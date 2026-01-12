@@ -1,3 +1,5 @@
+import { IncomingForm } from "formidable";
+
 export const config = {
   api: {
     bodyParser: false
@@ -5,27 +7,33 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") {
-      return res.status(405).send("Method Not Allowed");
-    }
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
-    // Parse files in memory
-    const formData = await req.formData();
-    const files = formData.getAll("files");
+  try {
+    // Parse multipart/form-data in memory
+    const form = new IncomingForm({ keepExtensions: true });
+    const files = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => {
+        if (err) reject(err);
+        else resolve(Object.values(files));
+      });
+    });
 
     if (!files.length) {
       return res.status(400).send('graph TD\nA["No files uploaded"]');
     }
 
     let combinedText = "";
-    for (const file of files) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      combinedText += `\n=== FILE: ${file.name} ===\n`;
-      combinedText += buffer.toString("utf8");
+    for (const fileArr of files) {
+      // fileArr may be an array if multiple uploads per input name
+      const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
+      for (const f of fileList) {
+        const content = await fs.promises.readFile(f.filepath, "utf8");
+        combinedText += `\n=== FILE: ${f.originalFilename} ===\n`;
+        combinedText += content;
+      }
     }
 
-    // Strict prompt for Claude
     const prompt = `You are a law concept diagram generator.
 
 Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
@@ -83,10 +91,8 @@ graph TD
 A["No extractable legal entities found"]
 
 Now analyse the following document and generate the Mermaid diagram.
-
 `;
 
-    // Call Claude API
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -97,19 +103,12 @@ Now analyse the following document and generate the Mermaid diagram.
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
-        messages: [
-          {
-            role: "user",
-            content: `${prompt}\n\nDOCUMENTS:\n${combinedText}`
-          }
-        ]
+        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }]
       })
     });
 
     const data = await response.json();
     const rawText = data.content?.[0]?.text || "";
-
-    // ✅ Strict Mermaid extraction
     const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
     const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
