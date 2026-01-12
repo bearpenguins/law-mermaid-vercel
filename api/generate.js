@@ -94,6 +94,11 @@ A["No extractable legal entities found"]
 Now analyse the following document and generate the Mermaid diagram.
 `;
 
+console.log("===== CLAUDE INPUT START =====");
+console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
+console.log("===== CLAUDE INPUT END =====");
+
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
