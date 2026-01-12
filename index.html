@@ -165,6 +165,12 @@ async function generateDiagram() {
 
 
 async function renderDiagram(code) {
+  // If Claude returned something that doesn't include a Mermaid graph, show an alert
+  if (!code.includes("graph")) {
+    alert("Server error:\n" + code);
+    return;
+  }
+
   const diagram = document.getElementById("diagram");
 
   diagram.innerHTML = `
@@ -180,6 +186,7 @@ ${code}
   resetZoom();
   enableLegendFiltering();
 }
+
 
 
 function enableLegendFiltering() {

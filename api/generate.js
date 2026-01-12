@@ -4,29 +4,29 @@ export const config = {
   }
 };
 
-import { readFile } from "fs/promises";
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
-  }
+  try {
+    if (req.method !== "POST") {
+      return res.status(405).send("Method Not Allowed");
+    }
 
-  const formData = await req.formData();
-  const files = formData.getAll("files");
+    // Parse files in memory
+    const formData = await req.formData();
+    const files = formData.getAll("files");
 
-  if (!files.length) {
-    return res.status(400).send('graph TD\nA["No files uploaded"]');
-  }
+    if (!files.length) {
+      return res.status(400).send('graph TD\nA["No files uploaded"]');
+    }
 
-  let combinedText = "";
+    let combinedText = "";
+    for (const file of files) {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      combinedText += `\n=== FILE: ${file.name} ===\n`;
+      combinedText += buffer.toString("utf8");
+    }
 
-  for (const file of files) {
-    const buffer = Buffer.from(await file.arrayBuffer());
-    combinedText += `\n=== FILE: ${file.name} ===\n`;
-    combinedText += buffer.toString("utf8");
-  }
-
-  const prompt = `You are a law concept diagram generator.
+    // Strict prompt for Claude
+    const prompt = `You are a law concept diagram generator.
 
 Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
 
@@ -83,29 +83,40 @@ graph TD
 A["No extractable legal entities found"]
 
 Now analyse the following document and generate the Mermaid diagram.
+
 `;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 2000,
-      messages: [
-        {
-          role: "user",
-          content: `${prompt}\n\nDOCUMENTS:\n${combinedText}`
-        }
-      ]
-    })
-  });
+    // Call Claude API
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 2000,
+        messages: [
+          {
+            role: "user",
+            content: `${prompt}\n\nDOCUMENTS:\n${combinedText}`
+          }
+        ]
+      })
+    });
 
-  const data = await response.json();
-  const text = data.content?.[0]?.text || "";
+    const data = await response.json();
+    const rawText = data.content?.[0]?.text || "";
 
-  res.send(text);
+    // ✅ Strict Mermaid extraction
+    const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
+    const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
+
+    res.send(mermaidCode);
+
+  } catch (err) {
+    console.error("SERVER ERROR:", err);
+    res.status(500).send('graph TD\nA["Server error – see logs"]');
+  }
 }
