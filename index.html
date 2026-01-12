@@ -137,24 +137,32 @@ function downloadPNG() {
 
 async function generateDiagram() {
   const fileInput = document.getElementById("fileInput");
+
   if (!fileInput.files.length) {
     alert("Please attach a file first.");
     return;
   }
 
   const formData = new FormData();
-  const files = fileInput.files;
-
-  for (const file of files) {
+  for (const file of fileInput.files) {
     formData.append("files", file);
   }
 
+  console.log("📤 Sending files to /api/generate");
 
-  const res = await fetch("/generate", { method: "POST", body: formData });
+  const res = await fetch("/api/generate", {
+    method: "POST",
+    body: formData
+  });
+
+  console.log("📥 Response status:", res.status);
+
   const mermaidCode = await res.text();
+  console.log("🧠 Mermaid code received:\n", mermaidCode);
 
   renderDiagram(mermaidCode);
 }
+
 
 async function renderDiagram(code) {
   const diagram = document.getElementById("diagram");
