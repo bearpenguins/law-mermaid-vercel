@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Concept Diagram Generator</title>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.min.js"></script>
+
+<script>
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "base",
+  themeVariables: {
+    fontFamily: "Arial"
+  }
+});
+</script>
+
+<style>
+body { font-family: Arial, sans-serif; background: #f8fafc; margin: 0; }
+header { background: #0f172a; color: white; padding: 20px; }
+section { padding: 16px; }
+#diagram-container {
+  border: 1px solid #cbd5e1;
+  background: white;
+  overflow: hidden;
+}
+
+button { margin-right: 8px; }
+
+.legend {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  border: 1px solid;
+  cursor: pointer;
+  user-select: none;
+}
+
+.legend.inactive {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.legend.case { background:#fef3c7; border-color:#92400e; }
+.legend.person { background:#e0f2fe; border-color:#0369a1; }
+.legend.organisation { background:#dcfce7; border-color:#166534; }
+.legend.legal_issue { background:#fee2e2; border-color:#991b1b; }
+.legend.event { background:#ede9fe; border-color:#5b21b6; }
+.legend.document { background:#f1f5f9; border-color:#334155; }
+.legend.location { background:#fff7ed; border-color:#9a3412; }
+
+.node.dim {
+  opacity: 0.15;
+}
+
+.legend.active {
+  outline: 2px solid #0f172a;
+}
+
+#diagram-container {
+  position: relative;
+  overflow: hidden;
+  height: 70vh;
+  cursor: grab;
+}
+
+#diagram-container.dragging {
+  cursor: grabbing;
+}
+
+#viewport {
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+#diagram-container.dragging * {
+  user-select: none;
+}
+
+</style>
+</head>
+
+<body>
+
+<header>
+  <h1>Welcome to Concept Diagram Generator</h1>
+  <p>Attach a document below for visualisation</p>
+</header>
+
+<section>
+  <input type="file" id="fileInput" multiple />
+  <button onclick="generateDiagram()">Generate Diagram</button>
+</section>
+
+<section id="diagram-container">
+    <div id="viewport">
+    <div id="diagram"></div>
+    <pre id="mermaidCode" style="display:none; white-space: pre-wrap;"></pre>
+  </div>
+</section>
+
+
+<section>
+  <button onclick="zoom(1.2)">Zoom In</button>
+  <button onclick="zoom(0.8)">Zoom Out</button>
+  <button onclick="resetZoom()">Reset</button>
+  <button onclick="downloadPNG()">Download PNG</button>
+  <button id="toggleViewBtn" onclick="toggleView()">Show Mermaid Code</button>
+</section>
+
+
+<section>
+  <h3>Concept Legend (Click to filter)</h3>
+  <div id="legend" style="display:flex; flex-wrap:wrap; gap:12px">
+    <span class="legend case" data-class="case">📄 Case</span>
+    <span class="legend person" data-class="person">👥 Person</span>
+    <span class="legend organisation" data-class="organisation">🏢 Organisation</span>
+    <span class="legend legal_issue" data-class="legal_issue">⚖️ Legal Issue</span>
+    <span class="legend event" data-class="event">⏱ Event</span>
+    <span class="legend document" data-class="document">📜 Document</span>
+    <span class="legend location" data-class="location">📍 Location</span>
+  </div>
+</section>
+
+<script>
+
+function downloadPNG() {
+  htmlToImage.toPng(document.getElementById("diagram")).then(url => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "concept-map.png";
+    a.click();
+  });
+}
+
+async function generateDiagram() {
+  const fileInput = document.getElementById("fileInput");
+  if (!fileInput.files.length) {
+    alert("Please attach a file first.");
+    return;
+  }
+
+  const formData = new FormData();
+  const files = fileInput.files;
+
+  for (const file of files) {
+    formData.append("files", file);
+  }
+
+
+  const res = await fetch("/generate", { method: "POST", body: formData });
+  const mermaidCode = await res.text();
+
+  renderDiagram(mermaidCode);
+}
+
+async function renderDiagram(code) {
+  const diagram = document.getElementById("diagram");
+
+  diagram.innerHTML = `
+    <div class="mermaid">
+${code}
+    </div>
+  `;
+
+  document.getElementById("mermaidCode").textContent = code;
+
+  await mermaid.run();
+
+  resetZoom();
+  enableLegendFiltering();
+}
+
+
+function enableLegendFiltering() {
+  document.querySelectorAll(".legend").forEach(item => {
+    item.onclick = () => {
+      const cls = item.dataset.class;
+      const alreadyActive = item.classList.contains("active");
+
+      // reset all
+      document.querySelectorAll(".legend").forEach(l => l.classList.remove("active"));
+      document.querySelectorAll(".node").forEach(n => n.classList.remove("dim"));
+
+      if (alreadyActive) return;
+
+      // activate current
+      item.classList.add("active");
+
+      document.querySelectorAll(".node").forEach(node => {
+        if (!node.classList.contains(cls)) {
+          node.classList.add("dim");
+        }
+      });
+    };
+  });
+}
+
+</script>
+<script>
+let scale = 1;
+let translateX = 0;
+let translateY = 0;
+
+let isDragging = false;
+let startX, startY;
+
+const viewport = () => document.getElementById("viewport");
+const container = () => document.getElementById("diagram-container");
+
+function updateTransform() {
+  viewport().style.transform =
+    `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+}
+
+function zoom(factor) {
+  scale *= factor;
+  scale = Math.min(Math.max(scale, 0.2), 5); // clamp
+  updateTransform();
+}
+
+function resetZoom() {
+  scale = 1;
+  translateX = 0;
+  translateY = 0;
+  updateTransform();
+}
+
+/* --- PANNING --- */
+
+container().addEventListener("mousedown", e => {
+  isDragging = true;
+  startX = e.clientX - translateX;
+  startY = e.clientY - translateY;
+  container().classList.add("dragging");
+});
+
+window.addEventListener("mousemove", e => {
+  if (!isDragging) return;
+  translateX = e.clientX - startX;
+  translateY = e.clientY - startY;
+  updateTransform();
+});
+
+window.addEventListener("mouseup", () => {
+  isDragging = false;
+  container().classList.remove("dragging");
+});
+
+let isCodeView = false;
+
+function toggleView() {
+  const diagramDiv = document.getElementById("diagram");
+  const codeDiv = document.getElementById("mermaidCode");
+  const btn = document.getElementById("toggleViewBtn");
+
+  if (isCodeView) {
+    // Switch to diagram
+    codeDiv.style.display = "none";
+    diagramDiv.style.display = "block";
+    btn.textContent = "Show Mermaid Code";
+  } else {
+    // Switch to code
+    codeDiv.textContent = diagramDiv.textContent; // show the raw Mermaid code
+    codeDiv.style.display = "block";
+    diagramDiv.style.display = "none";
+    btn.textContent = "Show Diagram";
+  }
+
+  isCodeView = !isCodeView;
+}
+
+</script>
+
+
+</body>
+</html>
