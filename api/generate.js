@@ -1,3 +1,4 @@
+import fs from "fs";
 import { IncomingForm } from "formidable";
 
 export const config = {
