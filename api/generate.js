@@ -1,23 +1,22 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
-import pdfParse from "pdf-parse";
 
 export const config = {
   api: {
-    bodyParser: false,
-  },
+    bodyParser: false
+  }
 };
 
-// Simple heuristic to check if content is mostly readable text
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter(c => c.charCodeAt(0) >= 32).length / text.length;
+
   return printableRatio > 0.8;
 }
 
+
 export default async function handler(req, res) {
-  if (req.method !== "POST")
-    return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   try {
     // Parse multipart/form-data in memory
@@ -30,98 +29,76 @@ export default async function handler(req, res) {
     });
 
     if (!files.length) {
-      return res
-        .status(400)
-        .send('graph TD\nA["No files uploaded"]');
+      return res.status(400).send('graph TD\nA["No files uploaded"]');
     }
 
     let combinedText = "";
-
     for (const fileArr of files) {
+      // fileArr may be an array if multiple uploads per input name
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
-
       for (const f of fileList) {
         const buffer = await fs.promises.readFile(f.filepath);
-        let content = "";
+        const content = buffer.toString("utf8");
 
-        // --- PDF handling ---
-        if (f.originalFilename.toLowerCase().endsWith(".pdf")) {
-          try {
-            const pdfData = await pdfParse(buffer);
-            content = pdfData.text;
-          } catch (err) {
-            console.warn("⚠️ Could not parse PDF:", f.originalFilename, err);
-            combinedText += `
-=== FILE: ${f.originalFilename} ===
-[WARNING: PDF could not be read or is corrupted.]
-`;
-            continue; // skip to next file
-          }
-        } else {
-          // For plain text files
-          content = buffer.toString("utf8");
-        }
-
-        // --- Check if looks like text ---
         if (!looksLikeText(content)) {
           console.warn("⚠️ Non-text file detected:", f.originalFilename);
 
           combinedText += `
-=== FILE: ${f.originalFilename} ===
-[WARNING: This file appears to be scanned or image-based and could not be read as text.]
-`;
+      === FILE: ${f.originalFilename} ===
+      [WARNING: This file appears to be scanned or image-based and could not be read as text.]
+      `;
           continue;
         }
 
-        // --- Append valid content ---
         combinedText += `
-=== FILE: ${f.originalFilename} ===
-${content}
-`;
+      === FILE: ${f.originalFilename} ===
+      ${content}
+      `;
       }
     }
 
     if (!combinedText.trim()) {
       return res.send(`
-graph TD
-A["Some files could not be processed"]:::document
-B["Scanned or image-based documents require OCR"]:::legal_issue
-A --> B
-`);
+    graph TD
+    A["Some files could not be processed"]:::document
+    B["Scanned or image-based documents require OCR"]:::legal_issue
+    A --> B
+    `);
     }
 
-    // --- Claude prompt ---
+
     const prompt = `You are a law concept diagram generator.
 
-Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
+      Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
 
-Output MUST start with 'graph TD' or 'graph LR'.
+      Output MUST start with 'graph TD' or 'graph LR'.
 
-STRICT RULES (DO NOT VIOLATE):
-1. Output ONLY valid Mermaid code.
-2. Start the output with: graph TD
-3. DO NOT include explanations, comments, markdown, or prose.
-4. DO NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
-5. DO NOT invent data.
-6. DO NOT output a section unless the document contains real, extractable entities.
-7. EVERY node must represent a REAL entity explicitly found in the document.
-8. Inform how much credit is left at the end, do not include this information within the diagram.
+      STRICT RULES (DO NOT VIOLATE):
+      1. Output ONLY valid Mermaid code.
+      2. Start the output with: graph TD
+      3. DO NOT include explanations, comments, markdown, or prose.
+      4. DO NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
+      5. DO NOT invent data.
+      6. DO NOT output a section unless the document contains real, extractable entities.
+      7. EVERY node must represent a REAL entity explicitly found in the document.
+      8. Inform how much credit is left at the end, do not include this information within the diagram.
 
-MANDATORY STYLING RULES:
-- Assign Mermaid classes to every node using :::className
-- Use ONLY the following classes:
+      MANDATORY STYLING RULES:
+      - Assign Mermaid classes to every node using :::className
+      - Use ONLY the following classes:
 
-case
-person
-organisation
-legal_issue
-event
-document
-location
+      case
+      person
+      organisation
+      legal_issue
+      event
+      document
+      location
 
-- Do NOT invent new classes.
+      - Do NOT invent new classes.
 
-ENTITY TYPES TO EXTRACT (only if present):
+
+      ENTITY TYPES TO EXTRACT (only if present):
       - Persons (directors, shareholders, officers)
       - Organisations (companies, authorities)
       - Locations (addresses, registered offices)
@@ -147,27 +124,26 @@ ENTITY TYPES TO EXTRACT (only if present):
       graph TD
       A["No extractable legal entities found"]
 
-Now analyse the following document and generate the Mermaid diagram.
-`;
+      Now analyse the following document and generate the Mermaid diagram.
+      `;
 
     console.log("===== CLAUDE INPUT START =====");
     console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
     console.log("===== CLAUDE INPUT END =====");
+
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "x-api-key": process.env.CLAUDE_API_KEY,
         "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
+        "content-type": "application/json"
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
-        messages: [
-          { role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` },
-        ],
-      }),
+        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }]
+      })
     });
 
     const data = await response.json();
@@ -178,11 +154,10 @@ Now analyse the following document and generate the Mermaid diagram.
 
     const rawText = data.content?.[0]?.text || "";
     const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
-    const mermaidCode = match
-      ? match[1].trim()
-      : 'graph TD\nA["No valid Mermaid diagram returned"]';
+    const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
     res.send(mermaidCode);
+
   } catch (err) {
     console.error("SERVER ERROR:", err);
     res.status(500).send('graph TD\nA["Server error – see logs"]');
