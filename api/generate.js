@@ -75,18 +75,19 @@ export default async function handler(req, res) {
     OUTPUT FORMAT (STRICT)
     ────────────────────────────────
     1. Output ONLY valid Mermaid code.
-    2. Output MUST begin with either:
+    2. Output raw Mermaid syntax only — NO markdown fences, NO triple backticks, NO backticks.
+    3. Output MUST begin with either:
       - graph TD
       - graph LR
-    3. Include a Mermaid title using the official syntax:
+    4. Include a Mermaid title using the official syntax:
 
       ---
       title: <Short descriptive title inferred from the documents>
       ---
 
-    4. Do NOT include explanations, markdown, comments, or prose.
-    5. Do NOT invent or assume any facts.
-    6. Every node MUST represent a real, explicitly stated entity in the document(s).
+    5. Do NOT include explanations, markdown, comments, or prose.
+    6. Do NOT invent or assume any facts.
+    7. Every node MUST represent a real, explicitly stated entity in the document(s).
 
     ────────────────────────────────
     ENTITY & CONTENT RULES
@@ -184,6 +185,11 @@ export default async function handler(req, res) {
     console.log("===== END CLAUDE RAW RESPONSE =====");
 
     const rawText = data.content?.[0]?.text || "";
+    rawText = rawText
+      .replace(/^```mermaid\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```$/i, "")
+      .trim();
     const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
     const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
