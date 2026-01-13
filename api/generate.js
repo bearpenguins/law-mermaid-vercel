@@ -69,104 +69,63 @@ export default async function handler(req, res) {
 
     const prompt = `You are a law concept diagram generator.
 
-    Your task is to analyse one or more legal documents and produce a single, unified Mermaid concept diagram.
+      Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
 
-    ────────────────────────────────
-    OUTPUT FORMAT (STRICT)
-    ────────────────────────────────
-    1. Output ONLY valid Mermaid code.
-    2. Output raw Mermaid syntax only — NO markdown fences, NO triple backticks, NO backticks.
-    3. Output MUST begin with either:
-      - graph TD
-      - graph LR
-    4. Include a Mermaid title using the official syntax:
+      Output MUST start with 'graph TD' or 'graph LR'.
 
-      ---
-      title: <Short descriptive title inferred from the documents>
-      ---
+      STRICT RULES (DO NOT VIOLATE):
+      1. Output ONLY valid Mermaid code.
+      2. Start the output with: graph TD
+      3. DO NOT include explanations, comments, markdown, or prose.
+      4. DO NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
+      5. DO NOT invent data.
+      6. DO NOT output a section unless the document contains real, extractable entities.
+      7. EVERY node must represent a REAL entity explicitly found in the document.
+      8. Inform how much credit is left at the end, do not include this information within the diagram.
 
-    5. Do NOT include explanations, markdown, comments, or prose.
-    6. Do NOT invent or assume any facts.
-    7. Every node MUST represent a real, explicitly stated entity in the document(s).
+      MANDATORY STYLING RULES:
+      - Assign Mermaid classes to every node using :::className
+      - Use ONLY the following classes:
 
-    ────────────────────────────────
-    ENTITY & CONTENT RULES
-    ────────────────────────────────
-    - Extract entities ONLY if they are explicitly present.
-    - Allowed entity types:
-      - case
-      - person
-      - organisation
-      - legal_issue
-      - event
-      - document
-      - location
+      case
+      person
+      organisation
+      legal_issue
+      event
+      document
+      location
 
-    - Do NOT invent new classes.
-    - Do NOT create empty or placeholder sections.
+      - Do NOT invent new classes.
 
-    If an entity type is not present, it MUST NOT appear in the diagram.
 
-    ────────────────────────────────
-    TITLE RULES
-    ────────────────────────────────
-    - The diagram title MUST be represented as a node.
-    - The title node ID MUST be TITLE.
-    - The title node MUST appear at the top.
-    - The title node MUST use class :::document.
-    - DO NOT use Mermaid frontmatter or markdown.
+      ENTITY TYPES TO EXTRACT (only if present):
+      - Persons (directors, shareholders, officers)
+      - Organisations (companies, authorities)
+      - Locations (addresses, registered offices)
+      - Legal Status (e.g. Struck Off, Active)
+      - Events (appointments, filings, strike-off)
+      - Documents (Bizfile, ACRA filings)
 
-    ────────────────────────────────
-    STRUCTURE RULES
-    ────────────────────────────────
-    - Use subgraphs ONLY when they contain at least one real entity.
-    - Subgraph titles must reflect the entity type (e.g. Persons, Organisations).
-    - Node labels must include real names and relevant attributes only.
-    - Relationships must be explicit and labeled.
+      STRUCTURE RULES:
+      - Use subgraphs for each entity type.
+      - Node labels must contain real names + key attributes.
+      - Relationships must be explicit and labeled.
 
-    ────────────────────────────────
-    STYLING RULES (MANDATORY)
-    ────────────────────────────────
-    - Every node MUST include a Mermaid class using :::className
-    - Use only the approved classes listed above.
+      EXAMPLE NODE FORMAT:
+      PERSON_ALAN["ALAN YEO KENG HUA<br/>NRIC: S1735082Z<br/>Role: Director"]
+      ORG_ARM["ASIA RESOURCES MANAGEMENT PTE LTD<br/>UEN: 200804657Z<br/>Status: Struck Off"]
 
-    ────────────────────────────────
-    MERMAID STRUCTURE EXAMPLE (FORMAT ONLY)
-    ────────────────────────────────
-    The following is a structural example ONLY.
-    Do NOT copy names, entities, or relationships from it.
+      RELATIONSHIP EXAMPLES:
+      PERSON_ALAN -->|Director| ORG_ARM
+      ORG_ARM -.->|Registered Address| LOC_GOLDHILL
 
-    graph TD
-    ---
-    title: Example Legal Concept Map
-    ---
+      IF the document contains NO extractable legal entities:
+      Output ONLY:
+      graph TD
+      A["No extractable legal entities found"]
 
-    subgraph Organisations
-      ORG_X["Company Name<br/>UEN: XXXXXXXX<br/>Status: Active"]:::organisation
-    end
-
-    subgraph Persons
-      PERSON_Y["Person Name<br/>Role: Director"]:::person
-    end
-
-    PERSON_Y -->|Director| ORG_X
-
-    ────────────────────────────────
-    EMPTY DOCUMENT RULE
-    ────────────────────────────────
-    If NO extractable legal entities exist, output ONLY:
-
-    graph TD
-    ---
-    title: No Extractable Legal Entities
-    ---
-    A["No extractable legal entities found"]:::document
-
-    ────────────────────────────────
-    TASK
-    ────────────────────────────────
-    Now analyse the following document(s) and generate the Mermaid diagram.
-    `;
+      Now analyse the following document and generate the Mermaid diagram.
+      `;
 
     console.log("===== CLAUDE INPUT START =====");
     console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
@@ -193,12 +152,7 @@ export default async function handler(req, res) {
     console.log(JSON.stringify(data, null, 2));
     console.log("===== END CLAUDE RAW RESPONSE =====");
 
-    let rawText = data.content?.[0]?.text || "";
-    rawText = rawText
-      .replace(/^```mermaid\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```$/i, "")
-      .trim();
+    const rawText = data.content?.[0]?.text || "";
     const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
     const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
