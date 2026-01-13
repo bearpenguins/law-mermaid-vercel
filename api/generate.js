@@ -184,7 +184,7 @@ export default async function handler(req, res) {
     console.log(JSON.stringify(data, null, 2));
     console.log("===== END CLAUDE RAW RESPONSE =====");
 
-    const rawText = data.content?.[0]?.text || "";
+    let rawText = data.content?.[0]?.text || "";
     rawText = rawText
       .replace(/^```mermaid\s*/i, "")
       .replace(/^```\s*/i, "")
