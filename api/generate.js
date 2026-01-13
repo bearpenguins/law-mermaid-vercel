@@ -114,6 +114,11 @@ console.log("===== CLAUDE INPUT END =====");
     });
 
     const data = await response.json();
+
+    console.log("===== CLAUDE RAW RESPONSE =====");
+    console.log(JSON.stringify(data, null, 2));
+    console.log("===== END CLAUDE RAW RESPONSE =====");
+
     const rawText = data.content?.[0]?.text || "";
     const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
     const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
