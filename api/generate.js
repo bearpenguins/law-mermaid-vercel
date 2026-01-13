@@ -108,6 +108,15 @@ export default async function handler(req, res) {
     If an entity type is not present, it MUST NOT appear in the diagram.
 
     ────────────────────────────────
+    TITLE RULES
+    ────────────────────────────────
+    - The diagram title MUST be represented as a node.
+    - The title node ID MUST be TITLE.
+    - The title node MUST appear at the top.
+    - The title node MUST use class :::document.
+    - DO NOT use Mermaid frontmatter or markdown.
+
+    ────────────────────────────────
     STRUCTURE RULES
     ────────────────────────────────
     - Use subgraphs ONLY when they contain at least one real entity.
