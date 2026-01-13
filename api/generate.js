@@ -81,7 +81,6 @@ export default async function handler(req, res) {
       5. DO NOT invent data.
       6. DO NOT output a section unless the document contains real, extractable entities.
       7. EVERY node must represent a REAL entity explicitly found in the document.
-      8. Inform how much credit is left at the end, do not include this information within the diagram.
 
       MANDATORY STYLING RULES:
       - Assign Mermaid classes to every node using :::className
