@@ -28,6 +28,11 @@ async function callClaude(prompt) {
   });
 
   const data = await response.json();
+
+  console.log("===== CLAUDE RAW RESPONSE =====");
+  console.log(JSON.stringify(data, null, 2));
+  console.log("===== END CLAUDE RAW RESPONSE =====");
+
   const rawText = data.content?.[0]?.text || "";
   const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
   return match ? match[1].trim() : "";
