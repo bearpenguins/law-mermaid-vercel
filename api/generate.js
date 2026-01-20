@@ -1,6 +1,7 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
-import extract from "pdf-text-extract";
+import Tesseract from "tesseract.js";
+import path from "path";
 
 export const config = {
   api: {
@@ -15,15 +16,16 @@ function looksLikeText(text) {
   return printableRatio > 0.8;
 }
 
-// Helper to extract text from PDF using pdf-text-extract
-function extractPdfText(buffer) {
-  return new Promise((resolve, reject) => {
-    extract(buffer, { splitPages: true }, (err, pages) => {
-      if (err) return reject(err);
-      const text = pages.join(" ");
-      resolve(text);
-    });
-  });
+// Utility to check supported file types
+function isSupported(file) {
+  const ext = path.extname(file.originalFilename).toLowerCase();
+  return [".pdf", ".png", ".jpg", ".jpeg"].includes(ext);
+}
+
+// OCR a file using tesseract.js
+async function ocrFile(filePath) {
+  const { data: { text } } = await Tesseract.recognize(filePath, 'eng');
+  return text;
 }
 
 export default async function handler(req, res) {
@@ -31,6 +33,7 @@ export default async function handler(req, res) {
     return res.status(405).send("Method Not Allowed");
 
   try {
+    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -51,46 +54,48 @@ export default async function handler(req, res) {
       for (const f of fileList) {
         const filename = f.originalFilename.toLowerCase();
 
-        if (!filename.endsWith(".pdf")) {
+        if (!isSupported(f)) {
           combinedText += `
 === FILE: ${f.originalFilename} ===
-[Unsupported file type. Only PDF documents are processed.]
+[Unsupported file type. Only PDF/images are processed.]
 `;
           continue;
         }
 
-        console.log("📄 Extracting PDF text:", f.originalFilename);
-        const buffer = await fs.promises.readFile(f.filepath);
+        console.log("📄 Processing file:", f.originalFilename);
 
-        let text;
+        let text = "";
         try {
-          text = await extractPdfText(buffer);
-        } catch (err) {
-          console.warn("⚠️ Could not extract PDF text:", f.originalFilename, err);
-          combinedText += `
+          // Run OCR
+          text = await ocrFile(f.filepath);
+          text = text.replace(/\s+/g, " ").trim();
+
+          // Safety: truncate very long text to ~4k tokens
+          const MAX_CHARS = 15000;
+          if (text.length > MAX_CHARS) {
+            text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+          }
+
+          if (!text || !looksLikeText(text)) {
+            combinedText += `
 === FILE: ${f.originalFilename} ===
-[PDF could not be read.]
+[File could not be read as text.]
 `;
-          continue;
-        }
+            continue;
+          }
 
-        // Clean and truncate for safety
-        text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
-        const MAX_CHARS = 15000;
-        if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
-
-        if (!text) {
           combinedText += `
-=== FILE: ${f.originalFilename} ===
-[PDF contained no extractable text.]
-`;
-          continue;
-        }
-
-        combinedText += `
 === FILE: ${f.originalFilename} ===
 ${text}
 `;
+
+        } catch (err) {
+          console.warn("⚠️ OCR failed:", f.originalFilename, err);
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+[OCR failed to extract text.]
+`;
+        }
       }
     }
 
@@ -103,7 +108,7 @@ A --> B
 `);
     }
 
-    // --- Claude prompt (kept from your previous version) ---
+    // --- Claude prompt ---
     const prompt = `You are a law concept diagram generator.
 
 Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
@@ -115,8 +120,8 @@ STRICT RULES (DO NOT VIOLATE):
 2. Start the output with: graph TD
 3. Do NOT include explanations, comments, markdown, or prose.
 4. Do NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
-5. Do NOT invent data.
-6. Do NOT output a section unless the document contains real, extractable entities.
+5. DO NOT invent data.
+6. DO NOT output a section unless the document contains real, extractable entities.
 7. EVERY node must represent a REAL entity explicitly found in the document.
 
 MANDATORY STYLING RULES:
@@ -193,6 +198,7 @@ Now analyse the following document and generate the Mermaid diagram.
       : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
     res.send(mermaidCode);
+
   } catch (err) {
     console.error("SERVER ERROR:", err);
     res.status(500).send('graph TD\nA["Server error – see logs"]');

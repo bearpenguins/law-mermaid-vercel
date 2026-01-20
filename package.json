@@ -14,6 +14,7 @@
     "node-fetch": "^3.3.2",
     "pdf-parse": "^2.4.5",
     "pdf-text-extract": "^1.5.0",
-    "pdfjs-dist": "^2.16.105"
+    "pdfjs-dist": "^2.16.105",
+    "tesseract.js": "^7.0.0"
   }
 }
