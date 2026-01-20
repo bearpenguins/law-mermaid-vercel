@@ -13,6 +13,6 @@
     "formidable": "^3.5.4",
     "node-fetch": "^3.3.2",
     "pdf-parse": "^2.4.5",
-    "pdfjs-dist": "^5.4.530"
+    "pdfjs-dist": "^2.16.105"
   }
 }
