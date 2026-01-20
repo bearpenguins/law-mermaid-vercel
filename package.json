@@ -20,6 +20,7 @@
   "dependencies": {
     "formidable": "^3.5.4",
     "node-fetch": "^3.3.2",
+    "pdf-parse": "^2.4.5",
     "pdf-poppler": "^0.2.3",
     "pdf2pic": "^3.2.0",
     "tesseract.js": "^4.1.1"
