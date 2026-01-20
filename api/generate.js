@@ -1,19 +1,13 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
+import pdfParse from "pdf-parse";
+
 
 export const config = {
   api: {
     bodyParser: false
   }
 };
-
-function looksLikeText(text) {
-  const printableRatio =
-    text.split("").filter(c => c.charCodeAt(0) >= 32).length / text.length;
-
-  return printableRatio > 0.8;
-}
-
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
@@ -42,35 +36,44 @@ export default async function handler(req, res) {
 
         const filename = f.originalFilename.toLowerCase();
 
-        // ✅ HANDLE PDF SAFELY
         if (filename.endsWith(".pdf")) {
-          console.warn("📄 Parsing PDF:", f.originalFilename);
+          console.warn("📄 Extracting PDF text:", f.originalFilename);
 
-          // ❌ DO NOT utf8-decode PDFs
-          // For now: block them cleanly
+          const pdfData = await pdfParse(buffer);
+
+          let text = pdfData.text || "";
+
+          // 🧹 CLEAN THE TEXT (very important)
+          text = text
+            .replace(/\s+/g, " ")        // collapse whitespace
+            .replace(/[^\x20-\x7E]/g, "") // remove weird binary chars
+            .trim();
+
+          // 🧠 TOKEN SAFETY LIMIT (CRITICAL)
+          const MAX_CHARS = 15000; // ~4k tokens
+          if (text.length > MAX_CHARS) {
+            text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+          }
+
+          if (!text) {
+            combinedText += `
+        === FILE: ${f.originalFilename} ===
+        [PDF contained no extractable text.]
+        `;
+            continue;
+          }
+
           combinedText += `
         === FILE: ${f.originalFilename} ===
-        [PDF detected. Text extraction required before processing.]
+        ${text}
         `;
           continue;
         }
-
-        // ✅ HANDLE TEXT FILES ONLY
-        content = buffer.toString("utf8");
-
-        // Safety check
-        if (!looksLikeText(content)) {
-          console.warn("⚠️ Non-text file detected:", f.originalFilename);
-          combinedText += `
-        === FILE: ${f.originalFilename} ===
-        [WARNING: File is not readable text.]
-        `;
-          continue;
-        }
-
+        
+        // ❌ Unsupported file types
         combinedText += `
         === FILE: ${f.originalFilename} ===
-        ${content}
+        [Unsupported file type. Only PDF documents are processed.]
         `;
       }
     }
