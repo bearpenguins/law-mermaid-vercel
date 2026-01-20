@@ -1,19 +1,26 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
-import pdfParse from "pdf-parse";
-
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
 
 export const config = {
   api: {
-    bodyParser: false
-  }
+    bodyParser: false,
+  },
 };
 
+// Utility to check if text is mostly readable
+function looksLikeText(text) {
+  const printableRatio =
+    text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
+  return printableRatio > 0.8;
+}
+
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST")
+    return res.status(405).send("Method Not Allowed");
 
   try {
-    // Parse multipart/form-data in memory
+    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -23,71 +30,77 @@ export default async function handler(req, res) {
     });
 
     if (!files.length) {
-      return res.status(400).send('graph TD\nA["No files uploaded"]');
+      return res
+        .status(400)
+        .send('graph TD\nA["No files uploaded"]');
     }
 
     let combinedText = "";
-    for (const fileArr of files) {
-      // fileArr may be an array if multiple uploads per input name
-      const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
-      for (const f of fileList) {
-        const buffer = await fs.promises.readFile(f.filepath);
-        let content = "";
 
+    for (const fileArr of files) {
+      const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
+
+      for (const f of fileList) {
         const filename = f.originalFilename.toLowerCase();
 
-        if (filename.endsWith(".pdf")) {
-          console.warn("📄 Extracting PDF text:", f.originalFilename);
-
-          const pdfData = await pdfParse(buffer);
-
-          let text = pdfData.text || "";
-
-          // 🧹 CLEAN THE TEXT (very important)
-          text = text
-            .replace(/\s+/g, " ")        // collapse whitespace
-            .replace(/[^\x20-\x7E]/g, "") // remove weird binary chars
-            .trim();
-
-          // 🧠 TOKEN SAFETY LIMIT (CRITICAL)
-          const MAX_CHARS = 15000; // ~4k tokens
-          if (text.length > MAX_CHARS) {
-            text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
-          }
-
-          if (!text) {
-            combinedText += `
-        === FILE: ${f.originalFilename} ===
-        [PDF contained no extractable text.]
-        `;
-            continue;
-          }
-
+        if (!filename.endsWith(".pdf")) {
           combinedText += `
-        === FILE: ${f.originalFilename} ===
-        ${text}
-        `;
+=== FILE: ${f.originalFilename} ===
+[Unsupported file type. Only PDF documents are processed.]
+`;
           continue;
         }
-        
-        // ❌ Unsupported file types
+
+        console.log("📄 Extracting PDF text:", f.originalFilename);
+
+        const buffer = await fs.promises.readFile(f.filepath);
+
+        // --- PDFJS text extraction ---
+        const pdfDoc = await pdfjsLib.getDocument({ data: buffer }).promise;
+        let fullText = "";
+        for (let i = 1; i <= pdfDoc.numPages; i++) {
+          const page = await pdfDoc.getPage(i);
+          const content = await page.getTextContent();
+          const pageText = content.items.map((item) => item.str).join(" ");
+          fullText += pageText + "\n";
+        }
+
+        // Clean up
+        fullText = fullText
+          .replace(/\s+/g, " ")
+          .replace(/[^\x20-\x7E]/g, "")
+          .trim();
+
+        const MAX_CHARS = 15000; // ~4k tokens
+        if (fullText.length > MAX_CHARS) {
+          fullText = fullText.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+        }
+
+        if (!fullText) {
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+[PDF contained no extractable text.]
+`;
+          continue;
+        }
+
         combinedText += `
-        === FILE: ${f.originalFilename} ===
-        [Unsupported file type. Only PDF documents are processed.]
-        `;
+=== FILE: ${f.originalFilename} ===
+${fullText}
+`;
       }
     }
 
     if (!combinedText.trim()) {
       return res.send(`
-    graph TD
-    A["Some files could not be processed"]:::document
-    B["Scanned or image-based documents require OCR"]:::legal_issue
-    A --> B
-    `);
+graph TD
+A["Some files could not be processed"]:::document
+B["Scanned or image-based documents require OCR"]:::legal_issue
+A --> B
+`);
     }
 
-
+    // --- Claude prompt ---
     const prompt = `You are a law concept diagram generator.
 
       Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
@@ -151,19 +164,18 @@ export default async function handler(req, res) {
     console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
     console.log("===== CLAUDE INPUT END =====");
 
-
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "x-api-key": process.env.CLAUDE_API_KEY,
         "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
+        "content-type": "application/json",
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
-        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }]
-      })
+        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }],
+      }),
     });
 
     const data = await response.json();
@@ -174,10 +186,11 @@ export default async function handler(req, res) {
 
     const rawText = data.content?.[0]?.text || "";
     const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
-    const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
+    const mermaidCode = match
+      ? match[1].trim()
+      : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
     res.send(mermaidCode);
-
   } catch (err) {
     console.error("SERVER ERROR:", err);
     res.status(500).send('graph TD\nA["Server error – see logs"]');
