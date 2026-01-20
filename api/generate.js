@@ -2,33 +2,65 @@ import fs from "fs";
 import path from "path";
 import { IncomingForm } from "formidable";
 import Tesseract from "tesseract.js-node";
+import { fromPath } from "pdf2pic";
 
 export const config = {
   api: { bodyParser: false },
 };
 
-// --- Utility: check if text is mostly readable ---
+// Utility to check if text is mostly readable
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
 }
 
-// --- Utility: OCR a file (PDF) using Tesseract ---
-async function ocrFile(filePath) {
+// Supported file types
+function isSupported(file) {
+  const ext = path.extname(file.originalFilename).toLowerCase();
+  return [".pdf", ".txt"].includes(ext);
+}
+
+// OCR a PNG/JPG image using Tesseract
+async function ocrImage(imagePath) {
   try {
-    const { data: { text } } = await Tesseract.recognize(filePath, "eng");
+    const { data: { text } } = await Tesseract.recognize(imagePath, "eng");
     return text || "";
   } catch (err) {
-    console.warn("⚠️ OCR failed for file:", filePath, err);
+    console.warn("⚠️ OCR failed for image:", imagePath, err);
     return "";
   }
 }
 
-// --- Utility: check supported file types ---
-function isSupported(file) {
-  const ext = path.extname(file.originalFilename).toLowerCase();
-  return [".pdf", ".txt"].includes(ext);
+// Convert PDF to images and OCR each page
+async function ocrPdf(pdfPath) {
+  const converter = fromPath(pdfPath, {
+    density: 150,
+    format: "png",
+    width: 1200,
+    height: 1600,
+    savePath: "/tmp",
+  });
+
+  const pageCount = 50; // safety limit
+  let fullText = "";
+
+  for (let i = 1; i <= pageCount; i++) {
+    try {
+      const pageFile = await converter(i, true); // returns { path: '...' }
+      if (!pageFile?.path || !fs.existsSync(pageFile.path)) break;
+
+      const pageText = await ocrImage(pageFile.path);
+      fullText += pageText + "\n";
+
+      // Clean up temp image
+      fs.unlinkSync(pageFile.path);
+    } catch {
+      break; // no more pages
+    }
+  }
+
+  return fullText;
 }
 
 // --- API handler ---
@@ -37,7 +69,7 @@ export default async function handler(req, res) {
     return res.status(405).send("Method Not Allowed");
 
   try {
-    // --- Parse multipart/form-data ---
+    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -56,8 +88,6 @@ export default async function handler(req, res) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
       for (const f of fileList) {
-        const ext = path.extname(f.originalFilename).toLowerCase();
-
         if (!isSupported(f)) {
           combinedText += `
 === FILE: ${f.originalFilename} ===
@@ -66,19 +96,20 @@ export default async function handler(req, res) {
           continue;
         }
 
+        const ext = path.extname(f.originalFilename).toLowerCase();
         let text = "";
 
-        if (ext === ".pdf") {
-          console.log("📄 OCR-ing PDF:", f.originalFilename);
-          text = await ocrFile(f.filepath);
-        } else if (ext === ".txt") {
+        if (ext === ".txt") {
           text = (await fs.promises.readFile(f.filepath, "utf8")) || "";
+        } else if (ext === ".pdf") {
+          console.log("📄 OCR-ing PDF:", f.originalFilename);
+          text = await ocrPdf(f.filepath);
         }
 
-        // --- Clean text ---
+        // Clean text
         text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
 
-        const MAX_CHARS = 15000; // ~4k tokens
+        const MAX_CHARS = 15000;
         if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
 
         if (!text) {
