@@ -1,10 +1,12 @@
 import fs from "fs";
 import path from "path";
 import { IncomingForm } from "formidable";
-import Tesseract from "tesseract.js";
-import { PDFImage } from "pdf-poppler";
+import { fromPath } from "pdf2pic"; // for PDF → images
+import Tesseract from "tesseract.js"; // pure JS, works on Linux
 
-export const config = { api: { bodyParser: false } };
+export const config = {
+  api: { bodyParser: false },
+};
 
 // --- Utility: check if text is mostly readable ---
 function looksLikeText(text) {
@@ -13,41 +15,32 @@ function looksLikeText(text) {
   return printableRatio > 0.8;
 }
 
-// --- Utility: OCR a single image file ---
-async function ocrImage(imagePath) {
+// --- OCR a single image file ---
+async function ocrImage(filePath) {
   try {
-    const { data: { text } } = await Tesseract.recognize(imagePath, "eng");
+    const { data: { text } } = await Tesseract.recognize(filePath, "eng");
     return text || "";
   } catch (err) {
-    console.warn("⚠️ OCR failed for image:", imagePath, err);
+    console.warn("⚠️ OCR failed for file:", filePath, err);
     return "";
   }
 }
 
-// --- Utility: convert PDF to images ---
-async function pdfToImages(pdfPath, outputDir) {
-  const opts = { format: "png", out_dir: outputDir, out_prefix: path.basename(pdfPath, ".pdf") };
-  try {
-    await PDFImage.convert(pdfPath, opts);
-    // returns array of generated image paths
-    return fs.readdirSync(outputDir)
-      .filter(f => f.startsWith(path.basename(pdfPath, ".pdf")) && f.endsWith(".png"))
-      .map(f => path.join(outputDir, f));
-  } catch (err) {
-    console.warn("⚠️ PDF to image conversion failed:", pdfPath, err);
-    return [];
-  }
+// --- Convert PDF to images and OCR ---
+async function ocrPdf(pdfPath) {
+  const storeAsImage = fromPath(pdfPath, { density: 150, saveFilename: "tmp", savePath: "/tmp", format: "png", width: 1200, height: 1600 });
+  const pdfInfo = await storeAsImage(1, { returnPromise: true }); // convert first page for now
+
+  if (!pdfInfo || !pdfInfo.path) return "";
+  const text = await ocrImage(pdfInfo.path);
+  fs.unlinkSync(pdfInfo.path); // cleanup
+  return text;
 }
 
-// --- Utility: check supported file types ---
-function isSupported(file) {
-  const ext = path.extname(file.originalFilename).toLowerCase();
-  return [".pdf", ".txt"].includes(ext);
-}
-
-// --- Main API handler ---
+// --- API handler ---
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST")
+    return res.status(405).send("Method Not Allowed");
 
   try {
     const form = new IncomingForm({ keepExtensions: true });
@@ -58,7 +51,9 @@ export default async function handler(req, res) {
       });
     });
 
-    if (!files.length) return res.status(400).send('graph TD\nA["No files uploaded"]');
+    if (!files.length) {
+      return res.status(400).send('graph TD\nA["No files uploaded"]');
+    }
 
     let combinedText = "";
 
@@ -67,8 +62,14 @@ export default async function handler(req, res) {
 
       for (const f of fileList) {
         const ext = path.extname(f.originalFilename).toLowerCase();
+        let text = "";
 
-        if (!isSupported(f)) {
+        if (ext === ".txt") {
+          text = (await fs.promises.readFile(f.filepath, "utf8")) || "";
+        } else if (ext === ".pdf") {
+          console.log("📄 OCR-ing PDF:", f.originalFilename);
+          text = await ocrPdf(f.filepath);
+        } else {
           combinedText += `
 === FILE: ${f.originalFilename} ===
 [Unsupported file type. Only PDF or TXT documents are processed.]
@@ -76,36 +77,8 @@ export default async function handler(req, res) {
           continue;
         }
 
-        let text = "";
-
-        if (ext === ".txt") {
-          // Read TXT file
-          text = (await fs.promises.readFile(f.filepath, "utf8")) || "";
-        } else if (ext === ".pdf") {
-          console.log("📄 Converting PDF to images:", f.originalFilename);
-
-          const tmpDir = path.join("/tmp", path.basename(f.filepath, ".pdf"));
-          if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
-
-          const imagePaths = await pdfToImages(f.filepath, tmpDir);
-          if (!imagePaths.length) {
-            combinedText += `
-=== FILE: ${f.originalFilename} ===
-[PDF could not be converted to images for OCR.]
-`;
-            continue;
-          }
-
-          console.log(`📷 Running OCR on ${imagePaths.length} images for ${f.originalFilename}`);
-          for (const img of imagePaths) {
-            const ocrText = await ocrImage(img);
-            text += ocrText + "\n";
-          }
-        }
-
-        // Clean and truncate
         text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
-        const MAX_CHARS = 15000;
+        const MAX_CHARS = 15000; // ~4k tokens
         if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
 
         if (!text) {
@@ -144,7 +117,7 @@ STRICT RULES (DO NOT VIOLATE):
 2. Start the output with: graph TD
 3. Do NOT include explanations, comments, markdown, or prose.
 4. Do NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
-5. Do NOT invent data.
+5. DO NOT invent data.
 6. Do NOT output a section unless the document contains real, extractable entities.
 7. EVERY node must represent a REAL entity explicitly found in the document.
 
@@ -195,6 +168,7 @@ Now analyse the following document and generate the Mermaid diagram.
     console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
     console.log("===== CLAUDE INPUT END =====");
 
+    // --- Call Claude API ---
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -205,9 +179,7 @@ Now analyse the following document and generate the Mermaid diagram.
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
-        messages: [
-          { role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` },
-        ],
+        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }],
       }),
     });
 
@@ -224,6 +196,7 @@ Now analyse the following document and generate the Mermaid diagram.
       : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
     res.send(mermaidCode);
+
   } catch (err) {
     console.error("SERVER ERROR:", err);
     res.status(500).send('graph TD\nA["Server error – see logs"]');
