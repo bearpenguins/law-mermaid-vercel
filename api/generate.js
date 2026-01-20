@@ -1,6 +1,6 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
-import pdfParse from "pdf-parse";
+import extract from "pdf-text-extract";
 
 export const config = {
   api: {
@@ -8,11 +8,22 @@ export const config = {
   },
 };
 
-// Simple check to see if text is mostly readable
+// Utility to check if text is mostly readable
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
+}
+
+// Helper to extract text from PDF using pdf-text-extract
+function extractPdfText(buffer) {
+  return new Promise((resolve, reject) => {
+    extract(buffer, { splitPages: true }, (err, pages) => {
+      if (err) return reject(err);
+      const text = pages.join(" ");
+      resolve(text);
+    });
+  });
 }
 
 export default async function handler(req, res) {
@@ -20,12 +31,11 @@ export default async function handler(req, res) {
     return res.status(405).send("Method Not Allowed");
 
   try {
-    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
         if (err) reject(err);
-        else resolve(Object.values(files).flat());
+        else resolve(Object.values(files));
       });
     });
 
@@ -34,53 +44,52 @@ export default async function handler(req, res) {
     }
 
     let combinedText = "";
-    const MAX_CHARS_PER_FILE = 15000; // ~4k tokens
 
-    for (const f of files) {
-      const filename = f.originalFilename.toLowerCase();
-      const buffer = await fs.promises.readFile(f.filepath);
+    for (const fileArr of files) {
+      const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
-      if (!filename.endsWith(".pdf")) {
-        combinedText += `
-=== FILE: ${f.originalFilename} ===
-[Unsupported file type. Only PDFs are processed.]
-`;
-        continue;
-      }
+      for (const f of fileList) {
+        const filename = f.originalFilename.toLowerCase();
 
-      console.log("📄 Extracting PDF text:", f.originalFilename);
-
-      try {
-        const pdfData = await pdfParse(buffer);
-        let text = pdfData.text || "";
-
-        // Clean text
-        text = text
-          .replace(/\s+/g, " ")
-          .replace(/[^\x20-\x7E]/g, "")
-          .trim();
-
-        if (!text || !looksLikeText(text)) {
+        if (!filename.endsWith(".pdf")) {
           combinedText += `
 === FILE: ${f.originalFilename} ===
-[PDF contains no readable text]
+[Unsupported file type. Only PDF documents are processed.]
 `;
           continue;
         }
 
-        if (text.length > MAX_CHARS_PER_FILE) {
-          text = text.slice(0, MAX_CHARS_PER_FILE) + "\n[TRUNCATED]";
+        console.log("📄 Extracting PDF text:", f.originalFilename);
+        const buffer = await fs.promises.readFile(f.filepath);
+
+        let text;
+        try {
+          text = await extractPdfText(buffer);
+        } catch (err) {
+          console.warn("⚠️ Could not extract PDF text:", f.originalFilename, err);
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+[PDF could not be read.]
+`;
+          continue;
+        }
+
+        // Clean and truncate for safety
+        text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
+        const MAX_CHARS = 15000;
+        if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+
+        if (!text) {
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+[PDF contained no extractable text.]
+`;
+          continue;
         }
 
         combinedText += `
 === FILE: ${f.originalFilename} ===
 ${text}
-`;
-      } catch (err) {
-        console.warn("⚠️ Could not parse PDF:", f.originalFilename, err);
-        combinedText += `
-=== FILE: ${f.originalFilename} ===
-[PDF could not be read]
 `;
       }
     }
@@ -88,13 +97,13 @@ ${text}
     if (!combinedText.trim()) {
       return res.send(`
 graph TD
-A["No extractable text found in uploaded PDFs"]:::document
-B["Scanned or unsupported PDFs require OCR"]:::legal_issue
+A["Some files could not be processed"]:::document
+B["Scanned or image-based documents require OCR"]:::legal_issue
 A --> B
 `);
     }
 
-    // --- Claude prompt (full version) ---
+    // --- Claude prompt (kept from your previous version) ---
     const prompt = `You are a law concept diagram generator.
 
 Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
@@ -107,7 +116,7 @@ STRICT RULES (DO NOT VIOLATE):
 3. Do NOT include explanations, comments, markdown, or prose.
 4. Do NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
 5. Do NOT invent data.
-6. DO NOT output a section unless the document contains real, extractable entities.
+6. Do NOT output a section unless the document contains real, extractable entities.
 7. EVERY node must represent a REAL entity explicitly found in the document.
 
 MANDATORY STYLING RULES:
@@ -157,7 +166,6 @@ Now analyse the following document and generate the Mermaid diagram.
     console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
     console.log("===== CLAUDE INPUT END =====");
 
-    // --- Call Claude API ---
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
