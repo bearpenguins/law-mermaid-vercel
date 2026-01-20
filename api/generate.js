@@ -38,22 +38,40 @@ export default async function handler(req, res) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
       for (const f of fileList) {
         const buffer = await fs.promises.readFile(f.filepath);
-        const content = buffer.toString("utf8");
+        let content = "";
 
+        const filename = f.originalFilename.toLowerCase();
+
+        // ✅ HANDLE PDF SAFELY
+        if (filename.endsWith(".pdf")) {
+          console.warn("📄 Parsing PDF:", f.originalFilename);
+
+          // ❌ DO NOT utf8-decode PDFs
+          // For now: block them cleanly
+          combinedText += `
+        === FILE: ${f.originalFilename} ===
+        [PDF detected. Text extraction required before processing.]
+        `;
+          continue;
+        }
+
+        // ✅ HANDLE TEXT FILES ONLY
+        content = buffer.toString("utf8");
+
+        // Safety check
         if (!looksLikeText(content)) {
           console.warn("⚠️ Non-text file detected:", f.originalFilename);
-
           combinedText += `
-      === FILE: ${f.originalFilename} ===
-      [WARNING: This file appears to be scanned or image-based and could not be read as text.]
-      `;
+        === FILE: ${f.originalFilename} ===
+        [WARNING: File is not readable text.]
+        `;
           continue;
         }
 
         combinedText += `
-      === FILE: ${f.originalFilename} ===
-      ${content}
-      `;
+        === FILE: ${f.originalFilename} ===
+        ${content}
+        `;
       }
     }
 
