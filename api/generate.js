@@ -1,27 +1,19 @@
 import fs from "fs";
 import path from "path";
 import { IncomingForm } from "formidable";
-import Tesseract from "tesseract.js-node";
-import { fromPath } from "pdf2pic";
+import Tesseract from "tesseract.js";
+import { PDFImage } from "pdf-poppler";
 
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
-// Utility to check if text is mostly readable
+// --- Utility: check if text is mostly readable ---
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
 }
 
-// Supported file types
-function isSupported(file) {
-  const ext = path.extname(file.originalFilename).toLowerCase();
-  return [".pdf", ".txt"].includes(ext);
-}
-
-// OCR a PNG/JPG image using Tesseract
+// --- Utility: OCR a single image file ---
 async function ocrImage(imagePath) {
   try {
     const { data: { text } } = await Tesseract.recognize(imagePath, "eng");
@@ -32,44 +24,32 @@ async function ocrImage(imagePath) {
   }
 }
 
-// Convert PDF to images and OCR each page
-async function ocrPdf(pdfPath) {
-  const converter = fromPath(pdfPath, {
-    density: 150,
-    format: "png",
-    width: 1200,
-    height: 1600,
-    savePath: "/tmp",
-  });
-
-  const pageCount = 50; // safety limit
-  let fullText = "";
-
-  for (let i = 1; i <= pageCount; i++) {
-    try {
-      const pageFile = await converter(i, true); // returns { path: '...' }
-      if (!pageFile?.path || !fs.existsSync(pageFile.path)) break;
-
-      const pageText = await ocrImage(pageFile.path);
-      fullText += pageText + "\n";
-
-      // Clean up temp image
-      fs.unlinkSync(pageFile.path);
-    } catch {
-      break; // no more pages
-    }
+// --- Utility: convert PDF to images ---
+async function pdfToImages(pdfPath, outputDir) {
+  const opts = { format: "png", out_dir: outputDir, out_prefix: path.basename(pdfPath, ".pdf") };
+  try {
+    await PDFImage.convert(pdfPath, opts);
+    // returns array of generated image paths
+    return fs.readdirSync(outputDir)
+      .filter(f => f.startsWith(path.basename(pdfPath, ".pdf")) && f.endsWith(".png"))
+      .map(f => path.join(outputDir, f));
+  } catch (err) {
+    console.warn("⚠️ PDF to image conversion failed:", pdfPath, err);
+    return [];
   }
-
-  return fullText;
 }
 
-// --- API handler ---
+// --- Utility: check supported file types ---
+function isSupported(file) {
+  const ext = path.extname(file.originalFilename).toLowerCase();
+  return [".pdf", ".txt"].includes(ext);
+}
+
+// --- Main API handler ---
 export default async function handler(req, res) {
-  if (req.method !== "POST")
-    return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   try {
-    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -78,9 +58,7 @@ export default async function handler(req, res) {
       });
     });
 
-    if (!files.length) {
-      return res.status(400).send('graph TD\nA["No files uploaded"]');
-    }
+    if (!files.length) return res.status(400).send('graph TD\nA["No files uploaded"]');
 
     let combinedText = "";
 
@@ -88,6 +66,8 @@ export default async function handler(req, res) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
       for (const f of fileList) {
+        const ext = path.extname(f.originalFilename).toLowerCase();
+
         if (!isSupported(f)) {
           combinedText += `
 === FILE: ${f.originalFilename} ===
@@ -96,19 +76,35 @@ export default async function handler(req, res) {
           continue;
         }
 
-        const ext = path.extname(f.originalFilename).toLowerCase();
         let text = "";
 
         if (ext === ".txt") {
+          // Read TXT file
           text = (await fs.promises.readFile(f.filepath, "utf8")) || "";
         } else if (ext === ".pdf") {
-          console.log("📄 OCR-ing PDF:", f.originalFilename);
-          text = await ocrPdf(f.filepath);
+          console.log("📄 Converting PDF to images:", f.originalFilename);
+
+          const tmpDir = path.join("/tmp", path.basename(f.filepath, ".pdf"));
+          if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
+
+          const imagePaths = await pdfToImages(f.filepath, tmpDir);
+          if (!imagePaths.length) {
+            combinedText += `
+=== FILE: ${f.originalFilename} ===
+[PDF could not be converted to images for OCR.]
+`;
+            continue;
+          }
+
+          console.log(`📷 Running OCR on ${imagePaths.length} images for ${f.originalFilename}`);
+          for (const img of imagePaths) {
+            const ocrText = await ocrImage(img);
+            text += ocrText + "\n";
+          }
         }
 
-        // Clean text
+        // Clean and truncate
         text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
-
         const MAX_CHARS = 15000;
         if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
 
@@ -199,7 +195,6 @@ Now analyse the following document and generate the Mermaid diagram.
     console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
     console.log("===== CLAUDE INPUT END =====");
 
-    // --- Call Claude API ---
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
