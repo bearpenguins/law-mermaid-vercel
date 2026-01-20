@@ -1,12 +1,9 @@
 import fs from "fs";
 import path from "path";
 import { IncomingForm } from "formidable";
-import { fromPath } from "pdf2pic"; // for PDF → images
-import Tesseract from "tesseract.js"; // pure JS, works on Linux
+import pdfParse from "pdf-parse";
 
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
 // --- Utility: check if text is mostly readable ---
 function looksLikeText(text) {
@@ -15,34 +12,40 @@ function looksLikeText(text) {
   return printableRatio > 0.8;
 }
 
-// --- OCR a single image file ---
-async function ocrImage(filePath) {
-  try {
-    const { data: { text } } = await Tesseract.recognize(filePath, "eng");
-    return text || "";
-  } catch (err) {
-    console.warn("⚠️ OCR failed for file:", filePath, err);
-    return "";
-  }
+// --- Utility: check supported file types ---
+function isSupported(file) {
+  const ext = path.extname(file.originalFilename).toLowerCase();
+  return [".pdf", ".txt"].includes(ext);
 }
 
-// --- Convert PDF to images and OCR ---
-async function ocrPdf(pdfPath) {
-  const storeAsImage = fromPath(pdfPath, { density: 150, saveFilename: "tmp", savePath: "/tmp", format: "png", width: 1200, height: 1600 });
-  const pdfInfo = await storeAsImage(1, { returnPromise: true }); // convert first page for now
+// --- Extract text from PDF ---
+async function extractPdfText(buffer, filename) {
+  try {
+    const data = await pdfParse(buffer);
+    let text = data.text || "";
 
-  if (!pdfInfo || !pdfInfo.path) return "";
-  const text = await ocrImage(pdfInfo.path);
-  fs.unlinkSync(pdfInfo.path); // cleanup
-  return text;
+    // Clean text
+    text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
+
+    // Token safety: limit text per PDF
+    const MAX_CHARS = 15000; // ~4k tokens
+    if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+
+    if (!text) throw new Error("No extractable text");
+
+    return text;
+  } catch (err) {
+    console.warn(`⚠️ Could not extract PDF text: ${filename}`, err);
+    return `[PDF could not be read.]`;
+  }
 }
 
 // --- API handler ---
 export default async function handler(req, res) {
-  if (req.method !== "POST")
-    return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   try {
+    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -61,15 +64,7 @@ export default async function handler(req, res) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
       for (const f of fileList) {
-        const ext = path.extname(f.originalFilename).toLowerCase();
-        let text = "";
-
-        if (ext === ".txt") {
-          text = (await fs.promises.readFile(f.filepath, "utf8")) || "";
-        } else if (ext === ".pdf") {
-          console.log("📄 OCR-ing PDF:", f.originalFilename);
-          text = await ocrPdf(f.filepath);
-        } else {
+        if (!isSupported(f)) {
           combinedText += `
 === FILE: ${f.originalFilename} ===
 [Unsupported file type. Only PDF or TXT documents are processed.]
@@ -77,9 +72,16 @@ export default async function handler(req, res) {
           continue;
         }
 
-        text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
-        const MAX_CHARS = 15000; // ~4k tokens
-        if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+        const buffer = await fs.promises.readFile(f.filepath);
+        let text = "";
+
+        if (f.originalFilename.toLowerCase().endsWith(".pdf")) {
+          console.log("📄 Extracting PDF text:", f.originalFilename);
+          text = await extractPdfText(buffer, f.originalFilename);
+        } else if (f.originalFilename.toLowerCase().endsWith(".txt")) {
+          text = buffer.toString("utf8") || "";
+          text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
+        }
 
         if (!text) {
           combinedText += `
@@ -117,7 +119,7 @@ STRICT RULES (DO NOT VIOLATE):
 2. Start the output with: graph TD
 3. Do NOT include explanations, comments, markdown, or prose.
 4. Do NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
-5. DO NOT invent data.
+5. Do NOT invent data.
 6. Do NOT output a section unless the document contains real, extractable entities.
 7. EVERY node must represent a REAL entity explicitly found in the document.
 
@@ -179,7 +181,9 @@ Now analyse the following document and generate the Mermaid diagram.
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
-        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }],
+        messages: [
+          { role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` },
+        ],
       }),
     });
 
@@ -196,7 +200,6 @@ Now analyse the following document and generate the Mermaid diagram.
       : 'graph TD\nA["No valid Mermaid diagram returned"]';
 
     res.send(mermaidCode);
-
   } catch (err) {
     console.error("SERVER ERROR:", err);
     res.status(500).send('graph TD\nA["Server error – see logs"]');
