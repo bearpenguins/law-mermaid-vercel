@@ -1,12 +1,10 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
-import Tesseract from "tesseract.js";
+import Tesseract from "tesseract.js-node";
 import path from "path";
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
 
 // Utility to check if text is mostly readable
@@ -16,15 +14,19 @@ function looksLikeText(text) {
   return printableRatio > 0.8;
 }
 
-// Utility to check supported file types
-function isSupported(file) {
-  const ext = path.extname(file.originalFilename).toLowerCase();
-  return [".pdf", ".png", ".jpg", ".jpeg"].includes(ext);
-}
-
 // OCR a file using tesseract.js
 async function ocrFile(filePath) {
-  const { data: { text } } = await Tesseract.recognize(filePath, 'eng');
+  const worker = Tesseract.createWorker({
+    logger: (m) => console.log(m), // optional
+  });
+
+  await worker.load();
+  await worker.loadLanguage("eng");
+  await worker.initialize("eng");
+
+  const { data: { text } } = await worker.recognize(filePath);
+
+  await worker.terminate();
   return text;
 }
 
@@ -42,9 +44,8 @@ export default async function handler(req, res) {
       });
     });
 
-    if (!files.length) {
+    if (!files.length)
       return res.status(400).send('graph TD\nA["No files uploaded"]');
-    }
 
     let combinedText = "";
 
@@ -52,48 +53,52 @@ export default async function handler(req, res) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
       for (const f of fileList) {
-        const filename = f.originalFilename.toLowerCase();
+        const ext = path.extname(f.originalFilename).toLowerCase();
 
-        if (!isSupported(f)) {
-          combinedText += `
+        if (ext === ".pdf") {
+          console.log("📄 OCR-ing PDF:", f.originalFilename);
+
+          try {
+            let text = await ocrFile(f.filepath);
+
+            text = text.replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "").trim();
+
+            const MAX_CHARS = 15000;
+            if (text.length > MAX_CHARS) {
+              text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+            }
+
+            if (!text) {
+              combinedText += `
 === FILE: ${f.originalFilename} ===
-[Unsupported file type. Only PDF/images are processed.]
+[PDF contained no extractable text.]
 `;
-          continue;
-        }
+              continue;
+            }
 
-        console.log("📄 Processing file:", f.originalFilename);
-
-        let text = "";
-        try {
-          // Run OCR
-          text = await ocrFile(f.filepath);
-          text = text.replace(/\s+/g, " ").trim();
-
-          // Safety: truncate very long text to ~4k tokens
-          const MAX_CHARS = 15000;
-          if (text.length > MAX_CHARS) {
-            text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
-          }
-
-          if (!text || !looksLikeText(text)) {
             combinedText += `
-=== FILE: ${f.originalFilename} ===
-[File could not be read as text.]
-`;
-            continue;
-          }
-
-          combinedText += `
 === FILE: ${f.originalFilename} ===
 ${text}
 `;
 
-        } catch (err) {
-          console.warn("⚠️ OCR failed:", f.originalFilename, err);
-          combinedText += `
+          } catch (err) {
+            console.warn("⚠️ OCR failed:", f.originalFilename, err);
+            combinedText += `
 === FILE: ${f.originalFilename} ===
 [OCR failed to extract text.]
+`;
+          }
+        } else if (ext === ".txt") {
+          // Plain text file
+          const content = await fs.promises.readFile(f.filepath, "utf8");
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+${content}
+`;
+        } else {
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+[Unsupported file type. Only PDF or TXT documents are processed.]
 `;
         }
       }
@@ -108,64 +113,65 @@ A --> B
 `);
     }
 
-    // --- Claude prompt ---
+    // Claude prompt
     const prompt = `You are a law concept diagram generator.
 
-Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
+      Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
 
-Output MUST start with 'graph TD' or 'graph LR'.
+      Output MUST start with 'graph TD' or 'graph LR'.
 
-STRICT RULES (DO NOT VIOLATE):
-1. Output ONLY valid Mermaid code.
-2. Start the output with: graph TD
-3. Do NOT include explanations, comments, markdown, or prose.
-4. Do NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
-5. DO NOT invent data.
-6. DO NOT output a section unless the document contains real, extractable entities.
-7. EVERY node must represent a REAL entity explicitly found in the document.
+      STRICT RULES (DO NOT VIOLATE):
+      1. Output ONLY valid Mermaid code.
+      2. Start the output with: graph TD
+      3. DO NOT include explanations, comments, markdown, or prose.
+      4. DO NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
+      5. DO NOT invent data.
+      6. DO NOT output a section unless the document contains real, extractable entities.
+      7. EVERY node must represent a REAL entity explicitly found in the document.
 
-MANDATORY STYLING RULES:
-- Assign Mermaid classes to every node using :::className
-- Use ONLY the following classes:
+      MANDATORY STYLING RULES:
+      - Assign Mermaid classes to every node using :::className
+      - Use ONLY the following classes:
 
-case
-person
-organisation
-legal_issue
-event
-document
-location
+      case
+      person
+      organisation
+      legal_issue
+      event
+      document
+      location
 
-- Do NOT invent new classes.
+      - Do NOT invent new classes.
 
-ENTITY TYPES TO EXTRACT (only if present):
-- Persons (directors, shareholders, officers)
-- Organisations (companies, authorities)
-- Locations (addresses, registered offices)
-- Legal Status (e.g. Struck Off, Active)
-- Events (appointments, filings, strike-off)
-- Documents (Bizfile, ACRA filings)
 
-STRUCTURE RULES:
-- Use subgraphs for each entity type.
-- Node labels must contain real names + key attributes.
-- Relationships must be explicit and labeled.
+      ENTITY TYPES TO EXTRACT (only if present):
+      - Persons (directors, shareholders, officers)
+      - Organisations (companies, authorities)
+      - Locations (addresses, registered offices)
+      - Legal Status (e.g. Struck Off, Active)
+      - Events (appointments, filings, strike-off)
+      - Documents (Bizfile, ACRA filings)
 
-EXAMPLE NODE FORMAT:
-PERSON_ALAN["ALAN YEO KENG HUA<br/>NRIC: S1735082Z<br/>Role: Director"]
-ORG_ARM["ASIA RESOURCES MANAGEMENT PTE LTD<br/>UEN: 200804657Z<br/>Status: Struck Off"]
+      STRUCTURE RULES:
+      - Use subgraphs for each entity type.
+      - Node labels must contain real names + key attributes.
+      - Relationships must be explicit and labeled.
 
-RELATIONSHIP EXAMPLES:
-PERSON_ALAN -->|Director| ORG_ARM
-ORG_ARM -.->|Registered Address| LOC_GOLDHILL
+      EXAMPLE NODE FORMAT:
+      PERSON_ALAN["ALAN YEO KENG HUA<br/>NRIC: S1735082Z<br/>Role: Director"]
+      ORG_ARM["ASIA RESOURCES MANAGEMENT PTE LTD<br/>UEN: 200804657Z<br/>Status: Struck Off"]
 
-IF the document contains NO extractable legal entities:
-Output ONLY:
-graph TD
-A["No extractable legal entities found"]
+      RELATIONSHIP EXAMPLES:
+      PERSON_ALAN -->|Director| ORG_ARM
+      ORG_ARM -.->|Registered Address| LOC_GOLDHILL
 
-Now analyse the following document and generate the Mermaid diagram.
-`;
+      IF the document contains NO extractable legal entities:
+      Output ONLY:
+      graph TD
+      A["No extractable legal entities found"]
+
+      Now analyse the following document and generate the Mermaid diagram.
+      `;
 
     console.log("===== CLAUDE INPUT START =====");
     console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
@@ -186,7 +192,6 @@ Now analyse the following document and generate the Mermaid diagram.
     });
 
     const data = await response.json();
-
     console.log("===== CLAUDE RAW RESPONSE =====");
     console.log(JSON.stringify(data, null, 2));
     console.log("===== END CLAUDE RAW RESPONSE =====");
