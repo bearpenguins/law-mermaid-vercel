@@ -2,24 +2,43 @@ import fs from "fs";
 import { IncomingForm } from "formidable";
 
 export const config = {
-  api: {
-    bodyParser: false
-  }
+  api: { bodyParser: false },
 };
 
 function looksLikeText(text) {
   const printableRatio =
-    text.split("").filter(c => c.charCodeAt(0) >= 32).length / text.length;
-
+    text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
 }
 
+// Helper: call Claude API
+async function callClaude(prompt) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": process.env.CLAUDE_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 2000,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await response.json();
+  const rawText = data.content?.[0]?.text || "";
+  const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
+  return match ? match[1].trim() : "";
+}
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST")
+    return res.status(405).send("Method Not Allowed");
 
   try {
-    // Parse multipart/form-data in memory
+    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -32,42 +51,23 @@ export default async function handler(req, res) {
       return res.status(400).send('graph TD\nA["No files uploaded"]');
     }
 
-    let combinedText = "";
+    let finalDiagram = "graph TD\n";
+
+    // --- Process each PDF individually ---
     for (const fileArr of files) {
-      // fileArr may be an array if multiple uploads per input name
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
+
       for (const f of fileList) {
         const buffer = await fs.promises.readFile(f.filepath);
         const content = buffer.toString("utf8");
 
         if (!looksLikeText(content)) {
           console.warn("⚠️ Non-text file detected:", f.originalFilename);
-
-          combinedText += `
-      === FILE: ${f.originalFilename} ===
-      [WARNING: This file appears to be scanned or image-based and could not be read as text.]
-      `;
-          continue;
+          continue; // skip non-text files
         }
 
-        combinedText += `
-      === FILE: ${f.originalFilename} ===
-      ${content}
-      `;
-      }
-    }
-
-    if (!combinedText.trim()) {
-      return res.send(`
-    graph TD
-    A["Some files could not be processed"]:::document
-    B["Scanned or image-based documents require OCR"]:::legal_issue
-    A --> B
-    `);
-    }
-
-
-    const prompt = `You are a law concept diagram generator.
+        // --- Construct individual prompt ---
+        const prompt = `You are a law concept diagram generator.
 
       Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
 
@@ -124,39 +124,28 @@ export default async function handler(req, res) {
       A["No extractable legal entities found"]
 
       Now analyse the following document and generate the Mermaid diagram.
+            
+      DOCUMENT:
+
+      === FILE: ${f.originalFilename} ===
+      ${content}
       `;
 
-    console.log("===== CLAUDE INPUT START =====");
-    console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
-    console.log("===== CLAUDE INPUT END =====");
+        console.log("Calling Claude for file:", f.originalFilename);
 
+        const partialDiagram = await callClaude(prompt);
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": process.env.CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 2000,
-        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }]
-      })
-    });
+        // Merge diagrams: skip repeated 'graph TD' in partial
+        const body = partialDiagram.replace(/graph\s+TD/, "").trim();
+        if (body) finalDiagram += "\n" + body + "\n";
+      }
+    }
 
-    const data = await response.json();
+    if (!finalDiagram.trim() || finalDiagram === "graph TD") {
+      finalDiagram += 'A["No extractable legal entities found"]';
+    }
 
-    console.log("===== CLAUDE RAW RESPONSE =====");
-    console.log(JSON.stringify(data, null, 2));
-    console.log("===== END CLAUDE RAW RESPONSE =====");
-
-    const rawText = data.content?.[0]?.text || "";
-    const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
-    const mermaidCode = match ? match[1].trim() : 'graph TD\nA["No valid Mermaid diagram returned"]';
-
-    res.send(mermaidCode);
-
+    res.send(finalDiagram);
   } catch (err) {
     console.error("SERVER ERROR:", err);
     res.status(500).send('graph TD\nA["Server error – see logs"]');
