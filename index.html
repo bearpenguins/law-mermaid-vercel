@@ -10,23 +10,49 @@
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.9.179/build/pdf.min.js"></script>
 
 <script>
-mermaid.initialize({ startOnLoad: false, theme: "base", themeVariables: { fontFamily: "Arial" } });
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "base",
+  themeVariables: { fontFamily: "Arial" }
+});
 </script>
 
 <style>
 body { font-family: Arial, sans-serif; background: #f8fafc; margin: 0; }
 header { background: #0f172a; color: white; padding: 20px; }
 section { padding: 16px; }
+
 #diagram-container { border: 1px solid #cbd5e1; background: white; overflow: hidden; height: 70vh; cursor: grab; }
 #viewport { transform-origin: 0 0; will-change: transform; }
 #diagram-container.dragging { cursor: grabbing; }
 #diagram-container.dragging * { user-select: none; }
 
 button { margin-right: 8px; }
+
+.legend {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  border: 1px solid;
+  cursor: pointer;
+  user-select: none;
+}
+.legend.inactive { opacity: 0.4; text-decoration: line-through; }
+.legend.case { background:#fef3c7; border-color:#92400e; }
+.legend.person { background:#e0f2fe; border-color:#0369a1; }
+.legend.organisation { background:#dcfce7; border-color:#166534; }
+.legend.legal_issue { background:#fee2e2; border-color:#991b1b; }
+.legend.event { background:#ede9fe; border-color:#5b21b6; }
+.legend.document { background:#f1f5f9; border-color:#334155; }
+.legend.location { background:#fff7ed; border-color:#9a3412; }
+
+.node.dim { opacity: 0.15; }
+.legend.active { outline: 2px solid #0f172a; }
 </style>
 </head>
 
 <body>
+
 <header>
   <h1>Concept Diagram Generator</h1>
   <p>Upload PDFs to extract text via OCR → Mermaid diagram</p>
@@ -43,6 +69,27 @@ button { margin-right: 8px; }
   <div id="viewport">
     <div id="diagram"></div>
     <pre id="mermaidCode" style="display:none; white-space: pre-wrap;"></pre>
+  </div>
+</section>
+
+<section>
+  <button onclick="zoom(1.2)">Zoom In</button>
+  <button onclick="zoom(0.8)">Zoom Out</button>
+  <button onclick="resetZoom()">Reset</button>
+  <button onclick="downloadPNG()">Download PNG</button>
+  <button id="toggleViewBtn" onclick="toggleView()">Show Mermaid Code</button>
+</section>
+
+<section>
+  <h3>Concept Legend (Click to filter)</h3>
+  <div id="legend" style="display:flex; flex-wrap:wrap; gap:12px">
+    <span class="legend case" data-class="case">📄 Case</span>
+    <span class="legend person" data-class="person">👥 Person</span>
+    <span class="legend organisation" data-class="organisation">🏢 Organisation</span>
+    <span class="legend legal_issue" data-class="legal_issue">⚖️ Legal Issue</span>
+    <span class="legend event" data-class="event">⏱ Event</span>
+    <span class="legend document" data-class="document">📜 Document</span>
+    <span class="legend location" data-class="location">📍 Location</span>
   </div>
 </section>
 
@@ -66,38 +113,6 @@ fileInput.addEventListener("change", () => {
   runBtn.disabled = selectedFiles.length === 0;
 });
 
-// PDF → image → OCR
-async function pdfToText(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-  let fullText = "";
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 2 });
-    const canvas = document.createElement("canvas");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    const ctx = canvas.getContext("2d");
-    await page.render({ canvasContext: ctx, viewport }).promise;
-
-    updateOCRProgress(file.name, `Page ${i} rendering`);
-
-    const { data } = await Tesseract.recognize(canvas, "eng", {
-      logger: m => {
-        if (m.status === "recognizing text") {
-          const pct = Math.round(m.progress * 100);
-          updateOCRProgress(file.name, `Page ${i} OCR`, pct);
-        }
-      }
-    });
-
-    fullText += data.text + "\n";
-  }
-
-  return fullText.trim();
-}
-
 function updateOCRProgress(fileName, status, pct=null) {
   const container = document.getElementById("ocrProgress");
   let row = document.getElementById(`ocr-${fileName}`);
@@ -110,21 +125,46 @@ function updateOCRProgress(fileName, status, pct=null) {
   row.textContent = pct !== null ? `📄 ${fileName}: ${status} (${pct}%)` : `📄 ${fileName}: ${status}`;
 }
 
+async function pdfToText(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+  let fullText = "";
+  for (let i=1;i<=pdf.numPages;i++){
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    await page.render({canvasContext:ctx,viewport}).promise;
+    updateOCRProgress(file.name, `Page ${i} rendering`);
+    const { data } = await Tesseract.recognize(canvas, "eng", {
+      logger: m => {
+        if (m.status==="recognizing text") {
+          updateOCRProgress(file.name, `Page ${i} OCR`, Math.round(m.progress*100));
+        }
+      }
+    });
+    fullText += data.text + "\n";
+  }
+  return fullText.trim();
+}
+
 runBtn.addEventListener("click", async () => {
   if (!selectedFiles.length) return alert("Select PDFs first");
 
   const formData = new FormData();
-  document.getElementById("diagram-title").textContent = "Title: " + selectedFiles.map(f=>f.name).join(", ");
+  document.getElementById("diagram-title").textContent = "Title: "+selectedFiles.map(f=>f.name).join(", ");
 
-  for (const file of selectedFiles) {
+  for(const file of selectedFiles){
     const text = await pdfToText(file);
-    if (!text.trim()) { alert(`OCR failed for ${file.name}`); return; }
-    formData.append("files", new File([new Blob([text], {type:"text/plain"})], file.name+".txt"));
+    if(!text.trim()){ alert(`OCR failed for ${file.name}`); return; }
+    formData.append("files", new File([new Blob([text],{type:"text/plain"})], file.name+".txt"));
   }
 
   logToPage("📤 Sending OCR text to /api/generate");
   try {
-    const res = await fetch("/api/generate", { method:"POST", body: formData });
+    const res = await fetch("/api/generate",{method:"POST",body:formData});
     logToPage(`📥 Response status: ${res.status}`);
     const mermaidCode = await res.text();
     logToPage("🧠 Mermaid code received:\n"+mermaidCode);
@@ -132,25 +172,81 @@ runBtn.addEventListener("click", async () => {
     logToPage("✅ Done");
   } catch(err) {
     console.error(err);
-    logToPage("❌ Request failed", "error");
+    logToPage("❌ Request failed","error");
   }
 });
 
-async function renderDiagram(code) {
-  if (!code.includes("graph")) { alert("Server error:\n"+code); return; }
+async function renderDiagram(code){
+  if(!code.includes("graph")){ alert("Server error:\n"+code); return; }
   const diagram = document.getElementById("diagram");
   diagram.innerHTML = `<div class="mermaid">\n${code}\n</div>`;
   document.getElementById("mermaidCode").textContent = code;
   await mermaid.run();
+  resetZoom();
+  enableLegendFiltering();
 }
 
-function logToPage(msg,type="info") {
-  const logsDiv = document.getElementById("serverLogs");
-  const time = new Date().toLocaleTimeString();
-  const prefix = type==="error"?"[ERROR] ": type==="warn"?"[WARN] ":"[INFO] ";
-  logsDiv.textContent += `${time} ${prefix}${msg}\n`;
-  logsDiv.scrollTop = logsDiv.scrollHeight;
+function enableLegendFiltering() {
+  document.querySelectorAll(".legend").forEach(item=>{
+    item.onclick=()=>{
+      const cls=item.dataset.class;
+      const alreadyActive=item.classList.contains("active");
+      document.querySelectorAll(".legend").forEach(l=>l.classList.remove("active"));
+      document.querySelectorAll(".node").forEach(n=>n.classList.remove("dim"));
+      if(alreadyActive) return;
+      item.classList.add("active");
+      document.querySelectorAll(".node").forEach(node=>{
+        if(!node.classList.contains(cls)) node.classList.add("dim");
+      });
+    };
+  });
+}
+
+function logToPage(msg,type="info"){
+  const logsDiv=document.getElementById("serverLogs");
+  const time=new Date().toLocaleTimeString();
+  const prefix=type==="error"?"[ERROR] ":type==="warn"?"[WARN] ":"[INFO] ";
+  logsDiv.textContent+=`${time} ${prefix}${msg}\n`;
+  logsDiv.scrollTop=logsDiv.scrollHeight;
+}
+
+function downloadPNG(){
+  const diagram=document.getElementById("diagram");
+  htmlToImage.toPng(diagram,{backgroundColor:"#ffffff"})
+  .then(url=>{
+    const a=document.createElement("a");
+    a.href=url;
+    a.download="concept-map.png";
+    a.click();
+  }).catch(err=>console.error("Error generating PNG:",err));
+}
+
+// --- ZOOM / PAN ---
+let scale=1,translateX=0,translateY=0,isDragging=false,startX,startY;
+const viewportEl=()=>document.getElementById("viewport");
+const containerEl=()=>document.getElementById("diagram-container");
+
+function updateTransform(){viewportEl().style.transform=`translate(${translateX}px,${translateY}px) scale(${scale})`;}
+function zoom(f){scale*=f; scale=Math.min(Math.max(scale,0.2),5); updateTransform();}
+function resetZoom(){scale=1; translateX=0; translateY=0; updateTransform();}
+containerEl().addEventListener("mousedown",e=>{isDragging=true; startX=e.clientX-translateX; startY=e.clientY-translateY; containerEl().classList.add("dragging");});
+window.addEventListener("mousemove",e=>{if(!isDragging)return; translateX=e.clientX-startX; translateY=e.clientY-startY; updateTransform();});
+window.addEventListener("mouseup",()=>{isDragging=false; containerEl().classList.remove("dragging");});
+
+let isCodeView=false;
+function toggleView(){
+  const diagramDiv=document.getElementById("diagram");
+  const codeDiv=document.getElementById("mermaidCode");
+  const btn=document.getElementById("toggleViewBtn");
+  if(isCodeView){
+    codeDiv.style.display="none"; diagramDiv.style.display="block"; btn.textContent="Show Mermaid Code";
+  }else{
+    codeDiv.textContent=document.getElementById("mermaidCode").textContent||"";
+    codeDiv.style.display="block"; diagramDiv.style.display="none"; btn.textContent="Show Diagram";
+  }
+  isCodeView=!isCodeView;
 }
 </script>
+
 </body>
 </html>
