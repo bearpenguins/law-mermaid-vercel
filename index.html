@@ -94,6 +94,10 @@ button { margin-right: 8px; }
   <button onclick="generateDiagram()">Generate Diagram</button>
 </section>
 
+<section id="diagram-title" style="padding:16px; font-weight:bold; font-size:18px;">
+  <!-- Will show "Title: ..." here -->
+</section>
+
 <section id="diagram-container">
     <div id="viewport">
     <div id="diagram"></div>
@@ -124,16 +128,29 @@ button { margin-right: 8px; }
   </div>
 </section>
 
+<section>
+  <h3>Server Logs</h3>
+  <pre id="serverLogs" style="background:#111;color:#eee;padding:10px;overflow:auto;max-height:300px;white-space:pre-wrap;"></pre>
+</section>
+
+
 <script>
 
 function downloadPNG() {
-  htmlToImage.toPng(document.getElementById("diagram")).then(url => {
+  const diagram = document.getElementById("diagram");
+
+  htmlToImage.toPng(diagram, {
+    backgroundColor: "#ffffff" // <-- force white background
+  }).then(url => {
     const a = document.createElement("a");
     a.href = url;
     a.download = "concept-map.png";
     a.click();
+  }).catch(err => {
+    console.error("Error generating PNG:", err);
   });
 }
+
 
 async function generateDiagram() {
   const fileInput = document.getElementById("fileInput");
@@ -143,22 +160,27 @@ async function generateDiagram() {
     return;
   }
 
+  // --- Set title based on file names ---
+  const fileNames = Array.from(fileInput.files).map(f => f.name);
+  document.getElementById("diagram-title").textContent =
+    "Title: " + fileNames.map(name => `"${name}"`).join(",");
+
+
   const formData = new FormData();
   for (const file of fileInput.files) {
     formData.append("files", file);
   }
 
-  console.log("📤 Sending files to /api/generate");
+  logToPage("📤 Sending files to /api/generate");
 
   const res = await fetch("/api/generate", {
     method: "POST",
     body: formData
   });
 
-  console.log("📥 Response status:", res.status);
-
+  logToPage(`📥 Response status: ${res.status}`);
   const mermaidCode = await res.text();
-  console.log("🧠 Mermaid code received:\n", mermaidCode);
+  logToPage("🧠 Mermaid code received:\n" + mermaidCode);
 
   renderDiagram(mermaidCode);
 }
@@ -212,6 +234,20 @@ function enableLegendFiltering() {
     };
   });
 }
+
+function logToPage(message, type = "info") {
+  const logsDiv = document.getElementById("serverLogs");
+  const time = new Date().toLocaleTimeString();
+  let prefix = "";
+
+  if (type === "error") prefix = "[ERROR] ";
+  else if (type === "warn") prefix = "[WARN] ";
+  else prefix = "[INFO] ";
+
+  logsDiv.textContent += `${time} ${prefix}${message}\n`;
+  logsDiv.scrollTop = logsDiv.scrollHeight; // auto-scroll
+}
+
 
 </script>
 <script>
@@ -272,13 +308,13 @@ function toggleView() {
   const btn = document.getElementById("toggleViewBtn");
 
   if (isCodeView) {
-    // Switch to diagram
+    // Switch back to diagram view
     codeDiv.style.display = "none";
     diagramDiv.style.display = "block";
     btn.textContent = "Show Mermaid Code";
   } else {
-    // Switch to code
-    codeDiv.textContent = diagramDiv.textContent; // show the raw Mermaid code
+    // Switch to code view: always show the latest raw Mermaid code
+    codeDiv.textContent = document.getElementById("mermaidCode").textContent || "";
     codeDiv.style.display = "block";
     diagramDiv.style.display = "none";
     btn.textContent = "Show Diagram";
@@ -286,9 +322,6 @@ function toggleView() {
 
   isCodeView = !isCodeView;
 }
-
 </script>
-
-
 </body>
 </html>
