@@ -3,15 +3,16 @@ import { IncomingForm } from "formidable";
 
 export const config = { api: { bodyParser: false } };
 
-// Check if text is mostly readable
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
 }
 
-// Helper: call Claude API
-async function callClaude(prompt, max_tokens = 2000) {
+// Helper: call Claude API and log raw response
+async function callClaude(prompt, filename) {
+  console.log(`Calling Claude for file: ${filename}`);
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -21,35 +22,35 @@ async function callClaude(prompt, max_tokens = 2000) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      max_tokens,
+      max_tokens: 2000,
       messages: [{ role: "user", content: prompt }],
     }),
   });
 
   const data = await response.json();
 
-  // --- RAW RESPONSE LOG ---
+  // === RAW LOG ===
   console.log("===== CLAUDE RAW RESPONSE =====");
   console.log(JSON.stringify(data, null, 2));
   console.log("===== END CLAUDE RAW RESPONSE =====");
 
-  return data.content?.[0]?.text || "";
-}
+  const rawText = data.content?.[0]?.text || "";
 
-// Merge JSON arrays and deduplicate by key
-function mergeEntities(entityArrays, key = "name") {
-  const merged = {};
-  for (const arr of entityArrays) {
-    for (const item of arr) {
-      const k = item[key] || JSON.stringify(item);
-      merged[k] = { ...merged[k], ...item };
-    }
-  }
-  return Object.values(merged);
+  // Strip code fences and extra Markdown
+  const jsonMatch = rawText.match(/```json\s*([\s\S]*?)```/i);
+  const mermaidMatch = rawText.match(/```mermaid\s*([\s\S]*?)```/i);
+
+  // Return the clean content
+  if (jsonMatch) return jsonMatch[1].trim();
+  if (mermaidMatch) return mermaidMatch[1].trim();
+
+  // If no code blocks, return rawText (may still contain Mermaid or plain JSON)
+  return rawText.trim();
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST")
+    return res.status(405).send("Method Not Allowed");
 
   try {
     // --- Parse multipart/form-data ---
@@ -65,9 +66,9 @@ export default async function handler(req, res) {
       return res.status(400).send('graph TD\nA["No files uploaded"]');
     }
 
-    const pdfJsons = [];
+    let finalDiagram = "graph TD\n";
 
-    // --- Step 1: Extract JSON facts from each PDF individually ---
+    // --- Process each PDF individually ---
     for (const fileArr of files) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
@@ -77,7 +78,7 @@ export default async function handler(req, res) {
 
         if (!looksLikeText(content)) {
           console.warn("⚠️ Non-text file detected:", f.originalFilename);
-          continue;
+          continue; // skip non-text files
         }
 
         const prompt = `You are a law concept diagram generator.
@@ -137,78 +138,25 @@ export default async function handler(req, res) {
       A["No extractable legal entities found"]
 
       Now analyse the following document and generate the Mermaid diagram.
-          
-      DOCUMENT:
+
+      Now analyse the following document:
 
       === FILE: ${f.originalFilename} ===
-      ${content}
+      ${content}`;
 
-      JSON format:
-      {
-        "persons": [{"name":"","role":"","id":"","appointed":""}],
-        "organisations": [{"name":"","uen":"","status":""}],
-        "locations": [{"address":"","type":""}],
-        "events": [{"type":"","date":"","involves":""}],
-        "documents": [{"title":"","type":""}]
-      }
+        const partialOutput = await callClaude(prompt, f.originalFilename);
 
-      If no entity is present, return empty arrays.`;
-
-        console.log("Calling Claude for JSON extraction:", f.originalFilename);
-        const jsonText = await callClaude(prompt, 1500);
-
-        // --- Log the raw JSON text for this PDF ---
-        console.log(`===== RAW JSON OUTPUT (${f.originalFilename}) =====`);
-        console.log(jsonText);
-        console.log(`===== END RAW JSON OUTPUT (${f.originalFilename}) =====`);
-
-        try {
-          const parsed = JSON.parse(jsonText);
-          pdfJsons.push(parsed);
-        } catch (err) {
-          console.warn(
-            `⚠️ Failed to parse JSON from Claude for ${f.originalFilename}`,
-            err
-          );
-        }
+        // Merge diagrams: skip repeated 'graph TD' in partial
+        const body = partialOutput.replace(/graph\s+TD/, "").trim();
+        if (body) finalDiagram += "\n" + body + "\n";
       }
     }
 
-    // --- Step 2: Merge JSON facts ---
-    const mergedJSON = {
-      persons: mergeEntities(pdfJsons.map((j) => j.persons || []), "name"),
-      organisations: mergeEntities(pdfJsons.map((j) => j.organisations || []), "name"),
-      locations: mergeEntities(pdfJsons.map((j) => j.locations || []), "address"),
-      events: mergeEntities(pdfJsons.map((j) => j.events || []), "type"),
-      documents: mergeEntities(pdfJsons.map((j) => j.documents || []), "title"),
-    };
+    if (!finalDiagram.trim() || finalDiagram === "graph TD") {
+      finalDiagram += 'A["No extractable legal entities found"]';
+    }
 
-    console.log("===== MERGED JSON =====");
-    console.log(JSON.stringify(mergedJSON, null, 2));
-    console.log("===== END MERGED JSON =====");
-
-    // --- Step 3: Generate final Mermaid diagram ---
-    const mermaidPrompt = `You are a law concept diagram generator.
-
-Given the following JSON of legal entities, produce a single Mermaid diagram.
-Use the classes: case, person, organisation, legal_issue, event, document, location
-and output ONLY valid Mermaid code.
-
-JSON:
-${JSON.stringify(mergedJSON, null, 2)}`;
-
-    const finalMermaid = await callClaude(mermaidPrompt, 2000);
-
-    // --- Log the raw final Mermaid code ---
-    console.log("===== RAW FINAL MERMAID =====");
-    console.log(finalMermaid);
-    console.log("===== END RAW FINAL MERMAID =====");
-
-    const mermaidCode = finalMermaid.match(/(graph\s+(TD|LR)[\s\S]*)/)?.[1] || 
-                        'graph TD\nA["No valid Mermaid diagram returned"]';
-
-    res.send(mermaidCode);
-
+    res.send(finalDiagram);
   } catch (err) {
     console.error("SERVER ERROR:", err);
     res.status(500).send('graph TD\nA["Server error – see logs"]');
