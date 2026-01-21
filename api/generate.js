@@ -1,20 +1,21 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
+import mammoth from "mammoth";
+import path from "path";
 
 export const config = {
   api: { bodyParser: false },
 };
 
-// Utility: check if text is mostly readable
+// --- Check if text looks readable ---
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
 }
 
-// Helper: call Claude API
-async function callClaude(prompt, filename) {
-  console.log(`Calling Claude for file: ${filename}`);
+// --- Call Claude API ---
+async function callClaude(prompt) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -36,17 +37,17 @@ async function callClaude(prompt, filename) {
   console.log("===== END CLAUDE RAW RESPONSE =====");
 
   const rawText = data.content?.[0]?.text || "";
-  // Extract only the graph TD / LR portion
-  const match = rawText.match(/graph\s+(TD|LR)[\s\S]*/i);
-  return match ? match[0].trim() : "";
+  const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
+  return match ? match[1].trim() : "";
 }
 
+// --- API handler ---
 export default async function handler(req, res) {
   if (req.method !== "POST")
     return res.status(405).send("Method Not Allowed");
 
   try {
-    // Parse multipart/form-data
+    // --- Parse files ---
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -59,33 +60,38 @@ export default async function handler(req, res) {
       return res.status(400).send('graph TD\nA["No files uploaded"]');
     }
 
-    // --- Final diagram initialization with class styles ---
-    let finalDiagram = `graph TD
-  classDef case fill:#fef3c7,stroke:#92400e,stroke-width:1px,color:#000;
-  classDef person fill:#e0f2fe,stroke:#0369a1,stroke-width:1px,color:#000;
-  classDef organisation fill:#dcfce7,stroke:#166534,stroke-width:1px,color:#000;
-  classDef legal_issue fill:#fee2e2,stroke:#991b1b,stroke-width:1px,color:#000;
-  classDef event fill:#ede9fe,stroke:#5b21b6,stroke-width:1px,color:#000;
-  classDef document fill:#f1f5f9,stroke:#334155,stroke-width:1px,color:#000;
-  classDef location fill:#fff7ed,stroke:#9a3412,stroke-width:1px,color:#000;
-`;
+    let finalDiagram = "graph TD\n";
 
-    // --- Process each file individually ---
     for (const fileArr of files) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
       for (const f of fileList) {
-        const buffer = await fs.promises.readFile(f.filepath);
-        const content = buffer.toString("utf8");
+        const ext = path.extname(f.originalFilename).toLowerCase();
+
+        // --- Allow only .txt and .docx ---
+        if (![".txt", ".docx"].includes(ext)) {
+          console.warn("⚠️ Unsupported file type:", f.originalFilename);
+          continue;
+        }
+
+        let content = "";
+
+        if (ext === ".txt") {
+          const buffer = await fs.promises.readFile(f.filepath);
+          content = buffer.toString("utf8");
+        } else if (ext === ".docx") {
+          const result = await mammoth.extractRawText({ path: f.filepath });
+          content = result.value || "";
+        }
 
         if (!looksLikeText(content)) {
           console.warn("⚠️ Non-text file detected:", f.originalFilename);
           continue;
         }
 
-        console.log(`===== RAW INPUT (from ${f.originalFilename}) =====\n${content}\n===== END RAW INPUT =====`);
+        // --- Log raw input ---
+        console.log(`===== RAW INPUT (${f.originalFilename}) =====\n${content}\n===== END RAW INPUT =====`);
 
-        // Construct the prompt for Claude
         const prompt = `You are a law concept diagram generator.
 
       Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
@@ -148,12 +154,11 @@ export default async function handler(req, res) {
 
     === FILE: ${f.originalFilename} ===
     ${content}
-      `
+      `;
 
-        const partialDiagram = await callClaude(prompt, f.originalFilename);
+        const partialDiagram = await callClaude(prompt);
 
-        // Append partial diagram, removing its own graph TD
-        const body = partialDiagram.replace(/graph\s+(TD|LR)/i, "").trim();
+        const body = partialDiagram.replace(/graph\s+TD/, "").trim();
         if (body) finalDiagram += "\n" + body + "\n";
       }
     }
@@ -162,9 +167,11 @@ export default async function handler(req, res) {
       finalDiagram += 'A["No extractable legal entities found"]';
     }
 
+    console.log("===== LOG END ====="); // mark request completion
     res.send(finalDiagram);
   } catch (err) {
     console.error("SERVER ERROR:", err);
+    console.log("===== LOG END =====");
     res.status(500).send('graph TD\nA["Server error – see logs"]');
   }
 }
