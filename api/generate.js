@@ -1,18 +1,20 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
 
-export const config = { api: { bodyParser: false } };
+export const config = {
+  api: { bodyParser: false },
+};
 
+// Utility: check if text is mostly readable
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
 }
 
-// Helper: call Claude API and log raw response
+// Helper: call Claude API
 async function callClaude(prompt, filename) {
   console.log(`Calling Claude for file: ${filename}`);
-
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -29,23 +31,14 @@ async function callClaude(prompt, filename) {
 
   const data = await response.json();
 
-  // === RAW LOG ===
   console.log("===== CLAUDE RAW RESPONSE =====");
   console.log(JSON.stringify(data, null, 2));
   console.log("===== END CLAUDE RAW RESPONSE =====");
 
   const rawText = data.content?.[0]?.text || "";
-
-  // Strip code fences and extra Markdown
-  const jsonMatch = rawText.match(/```json\s*([\s\S]*?)```/i);
-  const mermaidMatch = rawText.match(/```mermaid\s*([\s\S]*?)```/i);
-
-  // Return the clean content
-  if (jsonMatch) return jsonMatch[1].trim();
-  if (mermaidMatch) return mermaidMatch[1].trim();
-
-  // If no code blocks, return rawText (may still contain Mermaid or plain JSON)
-  return rawText.trim();
+  // Extract only the graph TD / LR portion
+  const match = rawText.match(/graph\s+(TD|LR)[\s\S]*/i);
+  return match ? match[0].trim() : "";
 }
 
 export default async function handler(req, res) {
@@ -53,7 +46,7 @@ export default async function handler(req, res) {
     return res.status(405).send("Method Not Allowed");
 
   try {
-    // --- Parse multipart/form-data ---
+    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -66,9 +59,18 @@ export default async function handler(req, res) {
       return res.status(400).send('graph TD\nA["No files uploaded"]');
     }
 
-    let finalDiagram = "graph TD\n";
+    // --- Final diagram initialization with class styles ---
+    let finalDiagram = `graph TD
+  classDef case fill:#fef3c7,stroke:#92400e,stroke-width:1px,color:#000;
+  classDef person fill:#e0f2fe,stroke:#0369a1,stroke-width:1px,color:#000;
+  classDef organisation fill:#dcfce7,stroke:#166534,stroke-width:1px,color:#000;
+  classDef legal_issue fill:#fee2e2,stroke:#991b1b,stroke-width:1px,color:#000;
+  classDef event fill:#ede9fe,stroke:#5b21b6,stroke-width:1px,color:#000;
+  classDef document fill:#f1f5f9,stroke:#334155,stroke-width:1px,color:#000;
+  classDef location fill:#fff7ed,stroke:#9a3412,stroke-width:1px,color:#000;
+`;
 
-    // --- Process each PDF individually ---
+    // --- Process each file individually ---
     for (const fileArr of files) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
@@ -78,9 +80,10 @@ export default async function handler(req, res) {
 
         if (!looksLikeText(content)) {
           console.warn("⚠️ Non-text file detected:", f.originalFilename);
-          continue; // skip non-text files
+          continue;
         }
 
+        // Construct the prompt for Claude
         const prompt = `You are a law concept diagram generator.
 
       Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
@@ -138,16 +141,17 @@ export default async function handler(req, res) {
       A["No extractable legal entities found"]
 
       Now analyse the following document and generate the Mermaid diagram.
+          
+    DOCUMENT:
 
-      Now analyse the following document:
+    === FILE: ${f.originalFilename} ===
+    ${content}
+      `
 
-      === FILE: ${f.originalFilename} ===
-      ${content}`;
+        const partialDiagram = await callClaude(prompt, f.originalFilename);
 
-        const partialOutput = await callClaude(prompt, f.originalFilename);
-
-        // Merge diagrams: skip repeated 'graph TD' in partial
-        const body = partialOutput.replace(/graph\s+TD/, "").trim();
+        // Append partial diagram, removing its own graph TD
+        const body = partialDiagram.replace(/graph\s+(TD|LR)/i, "").trim();
         if (body) finalDiagram += "\n" + body + "\n";
       }
     }
