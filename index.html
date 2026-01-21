@@ -6,6 +6,8 @@
 
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
 
 <script>
 mermaid.initialize({
@@ -152,6 +154,25 @@ function downloadPNG() {
 }
 
 
+async function ocrFileClientSide(file) {
+  logToPage(`🧠 OCR processing: ${file.name}`);
+
+  const { data } = await Tesseract.recognize(
+    file,
+    "eng",
+    {
+      logger: m => {
+        if (m.status === "recognizing text") {
+          logToPage(`OCR ${file.name}: ${(m.progress * 100).toFixed(0)}%`);
+        }
+      }
+    }
+  );
+
+  return data.text || "";
+}
+
+
 async function generateDiagram() {
   const fileInput = document.getElementById("fileInput");
 
@@ -166,9 +187,26 @@ async function generateDiagram() {
     "Title: " + fileNames.map(name => `"${name}"`).join(",");
 
   const formData = new FormData();
+
   for (const file of fileInput.files) {
-    formData.append("files", file);
+    if (
+      file.type === "application/pdf" ||
+      file.type.startsWith("image/")
+    ) {
+      const text = await ocrFileClientSide(file);
+
+      const blob = new Blob([text], { type: "text/plain" });
+      const textFile = new File([blob], file.name + ".txt", {
+        type: "text/plain"
+      });
+
+      formData.append("files", textFile);
+    } else {
+      alert(`Unsupported file: ${file.name}`);
+      return;
+    }
   }
+
 
   logToPage("📤 Sending files to /api/generate");
 

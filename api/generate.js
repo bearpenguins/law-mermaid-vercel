@@ -1,53 +1,39 @@
 import fs from "fs";
 import { IncomingForm } from "formidable";
-import mammoth from "mammoth";
+import Tesseract from "tesseract.js";
 import path from "path";
 
 export const config = {
-  api: { bodyParser: false },
+  api: {
+    bodyParser: false,
+  },
 };
 
-// --- Check if text looks readable ---
+// Utility to check if text is mostly readable
 function looksLikeText(text) {
   const printableRatio =
     text.split("").filter((c) => c.charCodeAt(0) >= 32).length / text.length;
   return printableRatio > 0.8;
 }
 
-// --- Call Claude API ---
-async function callClaude(prompt) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 2000,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-
-  const data = await response.json();
-
-  console.log("===== CLAUDE RAW RESPONSE =====");
-  console.log(JSON.stringify(data, null, 2));
-  console.log("===== END CLAUDE RAW RESPONSE =====");
-
-  const rawText = data.content?.[0]?.text || "";
-  const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
-  return match ? match[1].trim() : "";
+// Utility to check supported file types
+function isSupported(file) {
+  const ext = path.extname(file.originalFilename).toLowerCase();
+  return [".pdf", ".png", ".jpg", ".jpeg"].includes(ext);
 }
 
-// --- API handler ---
+// OCR a file using tesseract.js
+async function ocrFile(filePath) {
+  const { data: { text } } = await Tesseract.recognize(filePath, 'eng');
+  return text;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST")
     return res.status(405).send("Method Not Allowed");
 
   try {
-    // --- Parse files ---
+    // Parse multipart/form-data
     const form = new IncomingForm({ keepExtensions: true });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -60,118 +46,161 @@ export default async function handler(req, res) {
       return res.status(400).send('graph TD\nA["No files uploaded"]');
     }
 
-    let finalDiagram = "graph TD\n";
+    let combinedText = "";
 
     for (const fileArr of files) {
       const fileList = Array.isArray(fileArr) ? fileArr : [fileArr];
 
       for (const f of fileList) {
-        const ext = path.extname(f.originalFilename).toLowerCase();
+        const filename = f.originalFilename.toLowerCase();
 
-        // --- Allow only .txt and .docx ---
-        if (![".txt", ".docx"].includes(ext)) {
-          console.warn("⚠️ Unsupported file type:", f.originalFilename);
+        if (!isSupported(f)) {
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+[Unsupported file type. Only PDF/images are processed.]
+`;
           continue;
         }
 
-        let content = "";
+        console.log("📄 Processing file:", f.originalFilename);
 
-        if (ext === ".txt") {
-          const buffer = await fs.promises.readFile(f.filepath);
-          content = buffer.toString("utf8");
-        } else if (ext === ".docx") {
-          const result = await mammoth.extractRawText({ path: f.filepath });
-          content = result.value || "";
+        let text = "";
+        try {
+          // Run OCR
+          text = await ocrFile(f.filepath);
+          text = text.replace(/\s+/g, " ").trim();
+
+          // Safety: truncate very long text to ~4k tokens
+          const MAX_CHARS = 15000;
+          if (text.length > MAX_CHARS) {
+            text = text.slice(0, MAX_CHARS) + "\n[TRUNCATED]";
+          }
+
+          if (!text || !looksLikeText(text)) {
+            combinedText += `
+=== FILE: ${f.originalFilename} ===
+[File could not be read as text.]
+`;
+            continue;
+          }
+
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+${text}
+`;
+
+        } catch (err) {
+          console.warn("⚠️ OCR failed:", f.originalFilename, err);
+          combinedText += `
+=== FILE: ${f.originalFilename} ===
+[OCR failed to extract text.]
+`;
         }
-
-        if (!looksLikeText(content)) {
-          console.warn("⚠️ Non-text file detected:", f.originalFilename);
-          continue;
-        }
-
-        // --- Log raw input ---
-        console.log(`===== RAW INPUT (${f.originalFilename}) =====\n${content}\n===== END RAW INPUT =====`);
-
-        const prompt = `You are a law concept diagram generator.
-
-      Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
-
-      Output MUST start with 'graph TD' or 'graph LR'.
-
-      STRICT RULES (DO NOT VIOLATE):
-      1. Output ONLY valid Mermaid code.
-      2. Start the output with: graph TD
-      3. DO NOT include explanations, comments, markdown, or prose.
-      4. DO NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
-      5. DO NOT invent data.
-      6. DO NOT output a section unless the document contains real, extractable entities.
-      7. EVERY node must represent a REAL entity explicitly found in the document.
-
-      MANDATORY STYLING RULES:
-      - Assign Mermaid classes to every node using :::className
-      - Use ONLY the following classes:
-
-      case
-      person
-      organisation
-      legal_issue
-      event
-      document
-      location
-
-      - Do NOT invent new classes.
-
-
-      ENTITY TYPES TO EXTRACT (only if present):
-      - Persons (directors, shareholders, officers)
-      - Organisations (companies, authorities)
-      - Locations (addresses, registered offices)
-      - Legal Status (e.g. Struck Off, Active)
-      - Events (appointments, filings, strike-off)
-      - Documents (Bizfile, ACRA filings)
-
-      STRUCTURE RULES:
-      - Use subgraphs for each entity type.
-      - Node labels must contain real names + key attributes.
-      - Relationships must be explicit and labeled.
-
-      EXAMPLE NODE FORMAT:
-      PERSON_ALAN["ALAN YEO KENG HUA<br/>NRIC: S1735082Z<br/>Role: Director"]
-      ORG_ARM["ASIA RESOURCES MANAGEMENT PTE LTD<br/>UEN: 200804657Z<br/>Status: Struck Off"]
-
-      RELATIONSHIP EXAMPLES:
-      PERSON_ALAN -->|Director| ORG_ARM
-      ORG_ARM -.->|Registered Address| LOC_GOLDHILL
-
-      IF the document contains NO extractable legal entities:
-      Output ONLY:
-      graph TD
-      A["No extractable legal entities found"]
-
-      Now analyse the following document and generate the Mermaid diagram.
-          
-    DOCUMENT:
-
-    === FILE: ${f.originalFilename} ===
-    ${content}
-      `;
-
-        const partialDiagram = await callClaude(prompt);
-
-        const body = partialDiagram.replace(/graph\s+TD/, "").trim();
-        if (body) finalDiagram += "\n" + body + "\n";
       }
     }
 
-    if (!finalDiagram.trim() || finalDiagram === "graph TD") {
-      finalDiagram += 'A["No extractable legal entities found"]';
+    if (!combinedText.trim()) {
+      return res.send(`
+graph TD
+A["Some files could not be processed"]:::document
+B["Scanned or image-based documents require OCR"]:::legal_issue
+A --> B
+`);
     }
 
-    console.log("===== LOG END ====="); // mark request completion
-    res.send(finalDiagram);
+    // --- Claude prompt ---
+    const prompt = `You are a law concept diagram generator.
+
+Given multiple documents, produce a single Mermaid concept map combining all relevant entities, locations, people, and events.
+
+Output MUST start with 'graph TD' or 'graph LR'.
+
+STRICT RULES (DO NOT VIOLATE):
+1. Output ONLY valid Mermaid code.
+2. Start the output with: graph TD
+3. Do NOT include explanations, comments, markdown, or prose.
+4. Do NOT create placeholder nodes (e.g. "Persons", "Organisations", "Legal Issues").
+5. DO NOT invent data.
+6. DO NOT output a section unless the document contains real, extractable entities.
+7. EVERY node must represent a REAL entity explicitly found in the document.
+
+MANDATORY STYLING RULES:
+- Assign Mermaid classes to every node using :::className
+- Use ONLY the following classes:
+
+case
+person
+organisation
+legal_issue
+event
+document
+location
+
+- Do NOT invent new classes.
+
+ENTITY TYPES TO EXTRACT (only if present):
+- Persons (directors, shareholders, officers)
+- Organisations (companies, authorities)
+- Locations (addresses, registered offices)
+- Legal Status (e.g. Struck Off, Active)
+- Events (appointments, filings, strike-off)
+- Documents (Bizfile, ACRA filings)
+
+STRUCTURE RULES:
+- Use subgraphs for each entity type.
+- Node labels must contain real names + key attributes.
+- Relationships must be explicit and labeled.
+
+EXAMPLE NODE FORMAT:
+PERSON_ALAN["ALAN YEO KENG HUA<br/>NRIC: S1735082Z<br/>Role: Director"]
+ORG_ARM["ASIA RESOURCES MANAGEMENT PTE LTD<br/>UEN: 200804657Z<br/>Status: Struck Off"]
+
+RELATIONSHIP EXAMPLES:
+PERSON_ALAN -->|Director| ORG_ARM
+ORG_ARM -.->|Registered Address| LOC_GOLDHILL
+
+IF the document contains NO extractable legal entities:
+Output ONLY:
+graph TD
+A["No extractable legal entities found"]
+
+Now analyse the following document and generate the Mermaid diagram.
+`;
+
+    console.log("===== CLAUDE INPUT START =====");
+    console.log(`${prompt}\n\nDOCUMENTS:\n${combinedText}`);
+    console.log("===== CLAUDE INPUT END =====");
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 2000,
+        messages: [{ role: "user", content: `${prompt}\n\nDOCUMENTS:\n${combinedText}` }],
+      }),
+    });
+
+    const data = await response.json();
+
+    console.log("===== CLAUDE RAW RESPONSE =====");
+    console.log(JSON.stringify(data, null, 2));
+    console.log("===== END CLAUDE RAW RESPONSE =====");
+
+    const rawText = data.content?.[0]?.text || "";
+    const match = rawText.match(/(graph\s+(TD|LR)[\s\S]*)/);
+    const mermaidCode = match
+      ? match[1].trim()
+      : 'graph TD\nA["No valid Mermaid diagram returned"]';
+
+    res.send(mermaidCode);
+
   } catch (err) {
     console.error("SERVER ERROR:", err);
-    console.log("===== LOG END =====");
     res.status(500).send('graph TD\nA["Server error – see logs"]');
   }
 }
