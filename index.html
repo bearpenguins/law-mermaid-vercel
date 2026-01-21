@@ -165,7 +165,6 @@ async function generateDiagram() {
   document.getElementById("diagram-title").textContent =
     "Title: " + fileNames.map(name => `"${name}"`).join(",");
 
-
   const formData = new FormData();
   for (const file of fileInput.files) {
     formData.append("files", file);
@@ -173,16 +172,25 @@ async function generateDiagram() {
 
   logToPage("📤 Sending files to /api/generate");
 
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    body: formData
-  });
+  try {
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      body: formData
+    });
 
-  logToPage(`📥 Response status: ${res.status}`);
-  const mermaidCode = await res.text();
-  logToPage("🧠 Mermaid code received:\n" + mermaidCode);
+    logToPage(`📥 Response status: ${res.status}`);
 
-  renderDiagram(mermaidCode);
+    const mermaidCode = await res.text();
+    logToPage("🧠 Mermaid code received:\n" + mermaidCode);
+
+    renderDiagram(mermaidCode);
+
+    logToPage("✅ Log end: request processed successfully.");
+  } catch (err) {
+    console.error(err);
+    logToPage("❌ Log end: request failed.", "error");
+  }
+
 }
 
 
