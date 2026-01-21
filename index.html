@@ -135,6 +135,11 @@ button { margin-right: 8px; }
   <pre id="serverLogs" style="background:#111;color:#eee;padding:10px;overflow:auto;max-height:300px;white-space:pre-wrap;"></pre>
 </section>
 
+<section>
+  <h3>OCR Progress</h3>
+  <div id="ocrProgress"></div>
+</section>
+
 
 <script>
 
@@ -151,6 +156,23 @@ function downloadPNG() {
   }).catch(err => {
     console.error("Error generating PNG:", err);
   });
+}
+
+function updateOCRProgress(fileName, status, percent = null) {
+  const container = document.getElementById("ocrProgress");
+  let row = document.getElementById(`ocr-${fileName}`);
+
+  if (!row) {
+    row = document.createElement("div");
+    row.id = `ocr-${fileName}`;
+    row.style.marginBottom = "6px";
+    container.appendChild(row);
+  }
+
+  row.textContent =
+    percent !== null
+      ? `📄 ${fileName}: ${status} (${percent}%)`
+      : `📄 ${fileName}: ${status}`;
 }
 
 
