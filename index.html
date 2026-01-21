@@ -195,6 +195,11 @@ async function generateDiagram() {
     ) {
       const text = await ocrFileClientSide(file);
 
+      if (!text.trim()) {
+        alert(`OCR failed or returned no text for ${file.name}`);
+        return;
+      }
+
       const blob = new Blob([text], { type: "text/plain" });
       const textFile = new File([blob], file.name + ".txt", {
         type: "text/plain"
