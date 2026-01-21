@@ -176,15 +176,41 @@ runBtn.addEventListener("click", async () => {
   }
 });
 
-async function renderDiagram(code){
-  if(!code.includes("graph")){ alert("Server error:\n"+code); return; }
+async function renderDiagram(code) {
+  if (!code.includes("graph")) {
+    alert("Server error:\n" + code);
+    return;
+  }
+
   const diagram = document.getElementById("diagram");
-  diagram.innerHTML = `<div class="mermaid">\n${code}\n</div>`;
+
+  // Add class definitions for legend colors
+  const styleBlock = `
+classDef case fill:#fef3c7,stroke:#92400e,stroke-width:2px;
+classDef person fill:#e0f2fe,stroke:#0369a1,stroke-width:2px;
+classDef organisation fill:#dcfce7,stroke:#166534,stroke-width:2px;
+classDef legal_issue fill:#fee2e2,stroke:#991b1b,stroke-width:2px;
+classDef event fill:#ede9fe,stroke:#5b21b6,stroke-width:2px;
+classDef document fill:#f1f5f9,stroke:#334155,stroke-width:2px;
+classDef location fill:#fff7ed,stroke:#9a3412,stroke-width:2px;
+`;
+
+  diagram.innerHTML = `
+<div class="mermaid">
+${code}
+
+${styleBlock}
+</div>
+  `;
+
   document.getElementById("mermaidCode").textContent = code;
+
   await mermaid.run();
+
   resetZoom();
   enableLegendFiltering();
 }
+
 
 function enableLegendFiltering() {
   document.querySelectorAll(".legend").forEach(item=>{
