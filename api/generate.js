@@ -83,6 +83,8 @@ export default async function handler(req, res) {
           continue;
         }
 
+        console.log(`===== RAW INPUT (from ${f.originalFilename}) =====\n${content}\n===== END RAW INPUT =====`);
+
         // Construct the prompt for Claude
         const prompt = `You are a law concept diagram generator.
 
